@@ -168,7 +168,7 @@ brew install unicorn pkg-config
 ### Build
 
 ```bash
-git clone <this repo> golinux && cd golinux
+git clone https://github.com/clockiscool1234/golinux.git && cd golinux
 go build -o golinux ./cmd/golinux
 ```
 

@@ -902,6 +902,25 @@ legacyPrefixes:
 	case op == 0x90:
 		return finish(func(e *Engine) (bool, error) { return false, nil })
 
+	// -- XCHG rAX, r (short form 0x91-0x97) ----------------------------
+	case op >= 0x91 && op <= 0x97:
+		reg := int(op-0x90) | boolBit(rexB)<<3
+		w := width(false)
+		return finish(func(e *Engine) (bool, error) {
+			a, err := e.readOperand(regOperand(RegRAX, rexPresent), w)
+			if err != nil {
+				return false, err
+			}
+			b, err := e.readOperand(regOperand(reg, rexPresent), w)
+			if err != nil {
+				return false, err
+			}
+			if err := e.writeOperand(regOperand(RegRAX, rexPresent), w, b); err != nil {
+				return false, err
+			}
+			return false, e.writeOperand(regOperand(reg, rexPresent), w, a)
+		})
+
 	// -- CLD/STD (direction flag) --------------------------------------
 	case op == 0xFC:
 		return finish(func(e *Engine) (bool, error) { e.setFlag(flagDF, false); return false, nil })

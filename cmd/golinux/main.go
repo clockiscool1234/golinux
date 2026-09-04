@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 
 	"golinux/internal/emulator"
@@ -200,7 +201,27 @@ func run() int {
 		return 1
 	}
 
-	hostProgram := vv.HostPath(program)
+	// Resolve any VFS-level symlinks on the initial program path before
+	// mapping it to a host path (e.g. /bin/sh -> /bin/busybox).
+	resolvedProgram := program
+	for i := 0; i < 40; i++ { // POSIX max symlink depth
+		meta, err := vv.GetMeta(resolvedProgram)
+		if err != nil {
+			break
+		}
+		if meta.Type != "lnk" {
+			break
+		}
+		target := meta.Target
+		if len(target) == 0 || target[0] != '/' {
+			// relative symlink: resolve against the symlink's directory
+			dir := path.Dir(resolvedProgram)
+			target = dir + "/" + target
+		}
+		resolvedProgram = target
+	}
+
+	hostProgram := vv.HostPath(resolvedProgram)
 	if err := proc.Load(hostProgram); err != nil {
 		fmt.Fprintf(os.Stderr, "golinux: loading %s: %v\n", program, err)
 		return 1

@@ -158,6 +158,97 @@ func (e *Engine) decodeTwoByte(
 		}
 		return finish(func(e *Engine) (bool, error) { return false, nil })
 
+	// ── SHLD / SHRD ───────────────────────────────────────────────────
+	case op2 == 0xA4, op2 == 0xA5: // SHLD r/m, r, imm8 / SHLD r/m, r, CL
+		w := width(false)
+		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		if err != nil {
+			return nil, err
+		}
+		rm := applySeg(mr.rm)
+		reg := regOperand(mr.regField, rexPresent)
+		var immByte *uint8
+		if op2 == 0xA4 {
+			v, err := c.u8()
+			if err != nil {
+				return nil, err
+			}
+			immByte = &v
+		}
+		return finish(func(e *Engine) (bool, error) {
+			dst, err := e.readOperand(rm, w)
+			if err != nil {
+				return false, err
+			}
+			src, err := e.readOperand(reg, w)
+			if err != nil {
+				return false, err
+			}
+			var cnt int
+			if immByte != nil {
+				cnt = int(*immByte)
+			} else {
+				cnt = int(e.regs.gpr[RegRCX] & 0xFF)
+			}
+			bits := w * 8
+			cnt &= bits - 1
+			if cnt == 0 {
+				return false, nil
+			}
+			mask := maskWidth(w)
+			result := ((dst << uint(cnt)) | (src >> uint(bits-cnt))) & mask
+			e.setFlag(flagCF, (dst>>uint(bits-cnt))&1 != 0)
+			e.setFlag(flagZF, result == 0)
+			e.setFlag(flagSF, result>>uint(bits-1) != 0)
+			e.setFlag(flagOF, cnt == 1 && (result>>uint(bits-1)) != (dst>>uint(bits-1)))
+			return false, e.writeOperand(rm, w, result)
+		})
+
+	case op2 == 0xAC, op2 == 0xAD: // SHRD r/m, r, imm8 / SHRD r/m, r, CL
+		w := width(false)
+		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		if err != nil {
+			return nil, err
+		}
+		rm := applySeg(mr.rm)
+		reg := regOperand(mr.regField, rexPresent)
+		var immByte *uint8
+		if op2 == 0xAC {
+			v, err := c.u8()
+			if err != nil {
+				return nil, err
+			}
+			immByte = &v
+		}
+		return finish(func(e *Engine) (bool, error) {
+			dst, err := e.readOperand(rm, w)
+			if err != nil {
+				return false, err
+			}
+			src, err := e.readOperand(reg, w)
+			if err != nil {
+				return false, err
+			}
+			var cnt int
+			if immByte != nil {
+				cnt = int(*immByte)
+			} else {
+				cnt = int(e.regs.gpr[RegRCX] & 0xFF)
+			}
+			bits := w * 8
+			cnt &= bits - 1
+			if cnt == 0 {
+				return false, nil
+			}
+			mask := maskWidth(w)
+			result := ((dst >> uint(cnt)) | (src << uint(bits-cnt))) & mask
+			e.setFlag(flagCF, (dst>>uint(cnt-1))&1 != 0)
+			e.setFlag(flagZF, result == 0)
+			e.setFlag(flagSF, result>>uint(bits-1) != 0)
+			e.setFlag(flagOF, cnt == 1 && (result>>uint(bits-1)) != (dst>>uint(bits-1)))
+			return false, e.writeOperand(rm, w, result)
+		})
+
 	// ── BT / BSF / BSR / POPCNT / LZCNT ─────────────────────────────────
 	case op2 == 0xA3, op2 == 0xAB, op2 == 0xB3, op2 == 0xBB: // BT/BTS/BTR/BTC r/m, r
 		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
@@ -169,15 +260,29 @@ func (e *Engine) decodeTwoByte(
 		w := width(false)
 		op := op2
 		return finish(func(e *Engine) (bool, error) {
-			base, err := e.readOperand(rm, w)
-			if err != nil {
-				return false, err
-			}
 			bit, err := e.readOperand(reg, w)
 			if err != nil {
 				return false, err
 			}
-			bit &= maskWidth(w) * 8
+			if rm.kind == opndReg {
+				bit &= uint64(w)*8 - 1
+			} else {
+				// Memory bit-string semantics: bit is a signed offset
+				// from the base address, and we read exactly 1 byte.
+				bitOff := int64(bit)
+				byteOff := bitOff / 8
+				if bitOff < 0 && bitOff%8 != 0 {
+					byteOff--
+				}
+				bit &= 7
+				rm.addr = uint64(int64(e.effAddr(rm)) + byteOff)
+				rm.ripRelative = false
+				w = 1 // Read/write only the targeted byte
+			}
+			base, err := e.readOperand(rm, w)
+			if err != nil {
+				return false, err
+			}
 			e.setFlag(flagCF, (base>>bit)&1 != 0)
 			switch op {
 			case 0xAB: // BTS
@@ -217,6 +322,41 @@ func (e *Engine) decodeTwoByte(
 				return false, e.writeOperand(rm, w, base^(1<<bit))
 			}
 			return false, nil
+		})
+	case op2 == 0xB0, op2 == 0xB1: // CMPXCHG r/m, r
+		byteOp := op2 == 0xB0
+		w := width(byteOp)
+		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		if err != nil {
+			return nil, err
+		}
+		rm := applySeg(mr.rm)
+		reg := regOperand(mr.regField, rexPresent)
+		accReg := regOperand(RegRAX, false) // AL/AX/EAX/RAX
+		return finish(func(e *Engine) (bool, error) {
+			dest, err := e.readOperand(rm, w)
+			if err != nil {
+				return false, err
+			}
+			acc, err := e.readOperand(accReg, w)
+			if err != nil {
+				return false, err
+			}
+			src, err := e.readOperand(reg, w)
+			if err != nil {
+				return false, err
+			}
+			// Compare DEST and ACC
+			e.subWithFlags(dest, acc, w)
+			
+			// Equality check must be based on truncated values.
+			// e.readOperand masks already, but let's be safe.
+			dest &= maskWidth(w)
+			acc &= maskWidth(w)
+			if dest == acc {
+				return false, e.writeOperand(rm, w, src)
+			}
+			return false, e.writeOperand(accReg, w, dest)
 		})
 	case op2 == 0xBC: // BSF r, r/m
 		mr, err := decodeModRM(e, c, rexR, rexX, rexB)

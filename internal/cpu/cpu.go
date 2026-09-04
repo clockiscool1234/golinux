@@ -68,7 +68,10 @@
 // when no hook (or a hook returning false) handles it.
 package cpu
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 // Register IDs. Values 0-15 are chosen to equal the raw x86 register
 // encoding (the 4-bit index formed by REX.R/X/B + the 3-bit field in
@@ -182,6 +185,9 @@ type Engine struct {
 	// running an instruction's semantics, and read by RIP-relative
 	// memory operands (see operand.go's effAddr).
 	curInstrEnd uint64
+
+	trace    [256]uint64
+	traceIdx int
 }
 
 // NewEngine returns a fresh CPU context with no memory mapped and all
@@ -381,9 +387,13 @@ func (e *Engine) EmuStart(begin, until uint64) error {
 		}
 
 		pc := e.regs.rip
+		e.trace[e.traceIdx] = pc
+		e.traceIdx = (e.traceIdx + 1) % 256
+
 		d, err := e.decodeOne(pc)
 		if err != nil {
 			if !e.handleFault(err) {
+				e.printTrace()
 				return err
 			}
 			continue // hook mapped the memory; retry the same instruction
@@ -408,12 +418,24 @@ func (e *Engine) EmuStart(begin, until uint64) error {
 		branched, err := d.exec(e)
 		if err != nil {
 			if !e.handleFault(err) {
+				e.printTrace()
 				return err
 			}
 			continue
 		}
 		if !branched {
 			e.regs.rip = e.curInstrEnd
+		}
+	}
+}
+
+func (e *Engine) printTrace() {
+	fmt.Fprintf(os.Stderr, "Recent execution trace (oldest to newest):\n")
+	for i := 0; i < 256; i++ {
+		idx := (e.traceIdx + i) % 256
+		rip := e.trace[idx]
+		if rip != 0 {
+			fmt.Fprintf(os.Stderr, "  %#x\n", rip)
 		}
 	}
 }

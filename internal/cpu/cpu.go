@@ -1,16 +1,17 @@
 // Package cpu is a native, pure-Go x86-64 CPU emulator: no cgo, no
 // libunicorn, no C toolchain required to build or run it.
 //
-// It exists to eventually replace internal/uc as the backend behind
-// internal/emulator, per the "Future direction" note in the top-level
-// README. To make that swap a small, mechanical change rather than a
-// rewrite of internal/emulator, Engine deliberately mirrors the exact
-// method surface of uc.Engine: MemMap/MemUnmap/MemProtect/MemRead/
-// MemWrite, RegRead/RegWrite, HookInsn/HookMemUnmapped, EmuStart/
-// EmuStop/Close, and the same Reg*/Ins*/Prot*/Mem*Unmapped constant
-// names (with package-local values -- internal/emulator would just
-// need `uc.RegRAX` etc. changed to `cpu.RegRAX` etc., and the `engine
-// *uc.Engine` field's type changed).
+// It has replaced internal/uc as the backend behind internal/emulator
+// (see that package's doc comment); internal/uc still exists as a
+// cgo/libunicorn-based alternative backend, kept available as a
+// fallback since Engine deliberately mirrors its exact method
+// surface: MemMap/MemUnmap/MemProtect/MemRead/MemWrite, RegRead/
+// RegWrite, HookInsn/HookMemUnmapped, EmuStart/EmuStop/Close, and the
+// same Reg*/Ins*/Prot*/Mem*Unmapped constant names (with
+// package-local values), so swapping back would just mean changing
+// internal/emulator's `engine *cpu.Engine` field's type back to
+// `*uc.Engine` and its `cpu.RegRAX`-style constant references back to
+// `uc.RegRAX`.
 //
 // Scope of this first pass: general-purpose integer execution only.
 //
@@ -46,11 +47,14 @@
 //	    way real hardware's microcode is -- indistinguishable from the
 //	    outside for a single-threaded interpreter like this one), and
 //	    CLD/STD for the direction flag they honor.
+//	  - BT/BSF/BSR/POPCNT, and core SSE and AVX vector instructions
+//	    (see sse.go/vex.go): XMM/YMM registers, VEX prefixes, data
+//	    movement, packed integer/float arithmetic, and conversions.
 //
 //	Not implemented yet (each is a real, separable follow-up):
-//	  - SSE/AVX, x87 floating point, MMX.
-//	  - Far jumps/calls, IN/OUT, most of the 0F-prefixed instruction
-//	    space beyond what's listed above (BT/BSF/BSR/POPCNT/...).
+//	  - x87 floating point, MMX.
+//	  - Far jumps/calls, IN/OUT, and the rest of the 0F-prefixed
+//	    instruction space beyond what's listed above.
 //	  - Address-size override (0x67) -- 64-bit addressing only.
 //	  - Precise AF (auxiliary carry) semantics for every corner case;
 //	    it's computed with the standard nibble-carry formula, which

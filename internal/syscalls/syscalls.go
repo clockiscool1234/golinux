@@ -30,10 +30,11 @@
 //	fork.go     execve (real); fork/vfork/clone/wait4 (ENOSYS, see file)
 //	exit.go     exit/exit_group
 //
-// This pass covers enough syscalls for real filesystem access,
-// process/identity introspection, and in-place execve(). Not yet
-// implemented, each for a specific reason documented in its would-be
-// file:
+// This pass covers real filesystem access, process/identity
+// introspection, in-place execve(), and synthetic /proc and /dev
+// content (see the procfs and devices packages, wired in via file.go
+// and fs_meta.go). Not yet implemented, each for a specific reason
+// documented in its would-be file:
 //   - fork/vfork/clone/wait4: Go's runtime isn't fork-safe (see
 //     fork.go) -- needs a different design than a direct port.
 //   - Real signal delivery: needs the sigtramp/context-switch
@@ -42,10 +43,6 @@
 //     fd table; stubbed conservatively for now (see misc.go).
 //   - sockets (socket/connect/bind/...): a whole subsystem on its
 //     own; not started yet.
-//   - /proc content (sysemu/procfs.py) and device nodes
-//     (sysemu/devices.py): not ported yet, so paths under /proc and
-//     opening /dev/null-style nodes fall back to plain VFS behavior
-//     rather than synthetic content.
 package syscalls
 
 import (

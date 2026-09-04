@@ -24,13 +24,13 @@ user-mode emulation or `ptrace`-based sandboxes than to Docker.
  └─────────────┘                                            │
                                                             ▼
  ┌─────────────┐   map segments, set up stack/auxv,   ┌───────────┐
- │  emulator   │──install SYSCALL/CPUID hooks────────▶│  uc (cgo) │
- │  (Process)  │                                      │ Unicorn   │
- └──────┬──────┘◀─────────────────────────────────────┤  Engine   │
-        │        every SYSCALL instruction traps here └───────────┘
-        ▼
+ │  emulator   │──install SYSCALL/CPUID hooks────────▶│    cpu    │
+ │  (Process)  │                                      │  (native  │
+ └──────┬──────┘◀─────────────────────────────────────┤ Go x86-64 │
+        │        every SYSCALL instruction traps here │  engine)  │
+        ▼                                             └───────────┘
  ┌─────────────┐
- │  syscalls   │  ~60 syscall handlers, dispatched by number
+ │  syscalls   │  ~110 syscall handlers, dispatched by number
  └──────┬──────┘
         │
    ┌────┼─────────────┬─────────────┬─────────────┐
@@ -50,13 +50,14 @@ user-mode emulation or `ptrace`-based sandboxes than to Docker.
 1. `elfload` parses the ELF64 header and program header table — no
    dependencies, just byte-slicing.
 2. `emulator.Process.Load()` maps each `PT_LOAD` segment into a fresh
-   Unicorn CPU context (`internal/uc`, a small hand-written cgo
-   binding to `libunicorn`), builds the initial stack (`argv`/`envp`/
+   `internal/cpu` engine context (a native, pure-Go x86-64 emulator —
+   no cgo, no C toolchain), builds the initial stack (`argv`/`envp`/
    auxv, per the System V x86-64 ABI), and points `RIP` at the entry
    point.
-3. `Process.Run()` calls `uc_emu_start`. Unicorn executes real machine
-   code at full native speed until it hits a `syscall` or `cpuid`
-   instruction, which trap into a Go callback via a cgo hook.
+3. `Process.Run()` calls `Engine.EmuStart()`, which decodes and
+   executes real machine code instruction-by-instruction until it
+   hits a `syscall` or `cpuid` instruction, which traps into a Go
+   callback via a hook.
 4. The `syscall` trap reads the syscall number and six arguments
    straight out of the guest's registers (`rax`, `rdi`, `rsi`, `rdx`,
    `r10`, `r8`, `r9` — the Linux x86-64 syscall calling convention),
@@ -68,7 +69,7 @@ user-mode emulation or `ptrace`-based sandboxes than to Docker.
 6. `exit`/`exit_group` unwind out of the loop via a typed error
    (`*syscalls.Stop`); `execve` unwinds the same way (`*syscalls.
    Execve`) and the loop rebuilds the process image in place with a
-   fresh Unicorn context.
+   fresh engine context.
 
 ### The virtual filesystem (`internal/vfs`)
 
@@ -100,7 +101,7 @@ handled as in-memory pseudo-devices.
 
 ### What's implemented
 
-~60 syscalls across file I/O, filesystem metadata, directory
+~110 syscalls across file I/O, filesystem metadata, directory
 operations, memory management (`brk`/`mmap`/`mprotect`), process/
 identity introspection, time, and mount table management — see the
 doc comment at the top of `internal/syscalls/syscalls.go` for the full
@@ -128,7 +129,21 @@ documented in the corresponding file:
 
 ### Requirements
 
-- **Go 1.22+**
+- **Go 1.25+**
+
+That's it for building and running `golinux` itself: `internal/cpu`,
+the native pure-Go x86-64 engine, is what `internal/emulator` actually
+uses now, and it has no cgo or C-toolchain dependency.
+
+`internal/uc` — the original cgo binding to `libunicorn` that
+`internal/cpu` was built to replace — is still in the tree as a
+drop-in alternative backend (see its and `internal/cpu`'s doc
+comments), but nothing imports it anymore. It's only pulled in by
+`go build ./...`/`go test ./...`/`go vet ./...` when they cover the
+whole module rather than just `./cmd/golinux`, so if you want to
+build or test *everything* (including `internal/uc`'s own tests),
+you'll additionally need:
+
 - **A C compiler** (cgo needs one) — `gcc` or `clang`
 - **libunicorn 2.x**, headers and shared library (`pkg-config unicorn`
   must resolve)
@@ -136,13 +151,18 @@ documented in the corresponding file:
 On Debian/Ubuntu:
 
 ```bash
-sudo apt-get install -y golang-go gcc pkg-config libunicorn-dev
+# golinux itself:
+sudo apt-get install -y golang-go
+# plus, only if building/testing the whole module (internal/uc):
+sudo apt-get install -y gcc pkg-config libunicorn-dev
 ```
 
 On macOS (via Homebrew):
 
 ```bash
-brew install go unicorn pkg-config
+brew install go
+# plus, only if building/testing the whole module (internal/uc):
+brew install unicorn pkg-config
 ```
 
 ### Build
@@ -155,7 +175,7 @@ go build -o golinux ./cmd/golinux
 ### Test
 
 ```bash
-go test ./...          # unit tests
+go test ./...          # unit tests (needs libunicorn for internal/uc's own tests)
 go vet ./...           # two expected false-positive warnings in
                         # internal/uc about the cgo.Handle pattern —
                         # see the comment right above that line
@@ -169,15 +189,31 @@ if `musl-gcc` isn't on `PATH`.
 
 ## Running
 
+Every flag has a short, single-dash acronym form and a long,
+double-dash descriptive form — use whichever you like:
+
+| short | long                 | meaning                                          |
+|-------|----------------------|---------------------------------------------------|
+| `-r`  | `--vfs-root`         | host directory backing the guest `/`               |
+| `-v`  | `--verbose`          | log every syscall to stderr                        |
+| `-n`  | `--no-automount`     | skip the default proc/sysfs/devtmpfs mount         |
+| `-X`  | `--extract-tarball`  | extract a tarball into the vfs root before running |
+| `-e`  | `--env`              | extra env var `KEY=VAL` (repeatable)               |
+| `-w`  | `--cwd`              | initial guest working directory                    |
+| `-I`  | `--host-file`        | import a host file, `host:guest` (repeatable)      |
+
 ```bash
 # Run a static binary, importing it into a fresh vfs root first:
 ./golinux --vfs-root ./vfsroot --host-file ./hello:/bin/hello /bin/hello arg1 arg2
 
 # Log every syscall to stderr:
-./golinux --vfs-root ./vfsroot -v /bin/hello
+./golinux -r ./vfsroot -v /bin/hello
 
 # Skip the default proc/sysfs/devtmpfs auto-mount:
-./golinux --vfs-root ./vfsroot --no-auto-mount /bin/hello
+./golinux --vfs-root ./vfsroot --no-automount /bin/hello
+
+# Unpack a rootfs tarball into the vfs root, then run a binary from it:
+./golinux -X alpine.tar.gz -r alpine /bin/sh
 ```
 
 `--vfs-root` is reused across runs — files created, written, or
@@ -203,9 +239,11 @@ directly). Neither of those compiles on macOS or Windows as written.
 The good news is that this is a small, contained problem, not an
 architectural one:
 
-- **Unicorn Engine itself is cross-platform** — Linux, macOS, and
-  Windows are all officially supported, so `internal/uc`'s cgo binding
-  has no OS-specific code in it at all.
+- **`internal/cpu`, the engine `internal/emulator` actually uses now,
+  is pure Go with no cgo or C-toolchain dependency at all** — the
+  original cgo binding to `libunicorn` (`internal/uc`) is no longer on
+  the hot path, so there's no C-library cross-platform story to verify
+  in the first place.
 - **The VFS's sidecar-metadata design was chosen specifically to avoid
   relying on host filesystem permissions** (see "The virtual
   filesystem" above) — no `chown`/`chmod`/real symlinks means no
@@ -219,14 +257,11 @@ architectural one:
   control only matters for interactive shell-style programs, not the
   batch/one-shot use case this CLI covers).
 
-Making this genuinely cross-platform would mean:
-
-1. Splitting those two spots into `_linux.go`/`_darwin.go`/
-   `_windows.go` files behind Go build tags, each doing the
-   platform-appropriate thing (or, on Windows, returning a sensible
-   stub since job-control groups don't really exist there).
-2. Verifying `libunicorn`'s Windows build story (typically MSYS2/vcpkg)
-   works smoothly with cgo's expectations there.
+Making this genuinely cross-platform would mean splitting those two
+spots into `_linux.go`/`_darwin.go`/`_windows.go` files behind Go
+build tags, each doing the platform-appropriate thing (or, on
+Windows, returning a sensible stub since job-control groups don't
+really exist there).
 
 Contributions doing that split are welcome — the boundaries are
 already clean, it's just work nobody's done yet.
@@ -237,12 +272,16 @@ already clean, it's just work nobody's done yet.
 cmd/golinux/            CLI entrypoint
 internal/
   elfload/               ELF64 parser (no dependencies)
-  uc/                    cgo bindings to libunicorn (the CPU emulation core)
+  uc/                    cgo bindings to libunicorn (legacy CPU emulation
+                         backend, kept as a drop-in alternative; no longer
+                         imported by internal/emulator)
   vfs/                   host-backed virtual filesystem + sidecar metadata
   fds/                   file descriptor table (stdio, files, dirs, pipes)
   procfs/                synthetic /proc content
   devices/               /dev/null, /dev/zero, /dev/random, etc.
-  cpu/                   pure-Go x86-64 CPU emulator core (including SSE/AVX)
+  cpu/                   pure-Go x86-64 CPU emulator core (including
+                         SSE/AVX) -- the CPU emulation backend actually
+                         used by internal/emulator today
   consts/                syscall numbers, flag bits (x86-64 Linux ABI)
   errno/                 errno values
   syscalls/              syscall handlers, one file per category:
@@ -257,49 +296,45 @@ internal/
     mount.go                       mount/umount2/chroot/sethostname
     misc.go                         getrlimit/statfs/ftruncate
     fork.go                          execve (real); fork/clone (not yet)
-    exit.go                           exit/exit_group
+    exit.go                          exit/exit_group
   emulator/              wires everything together: ELF loading, the
-                         Unicorn hooks, the run loop
+                         cpu.Engine hooks, the run loop
 ```
 
 Adding a new syscall means picking (or adding) the right category
 file, writing the handler, and calling `register()` in that file's
 `init()` — no shared table to merge-conflict over.
 
-## Future direction: a native Go CPU emulator
+## The native Go CPU emulator
 
-Right now the actual x86-64 instruction execution is delegated
-entirely to Unicorn Engine (a C library) via cgo. Writing a native,
-pure-Go x86-64 emulator to replace it — full instruction decoding,
-execution semantics, flags behavior, etc. — is a real possibility down
-the line, since it would drop the cgo/C-toolchain dependency
-entirely and make cross-compilation trivial.
+The actual x86-64 instruction execution is handled by `internal/cpu`,
+a native, pure-Go x86-64 emulator: no cgo, no libunicorn, no C
+toolchain required to build or run `golinux`.
 
-**A first pass now exists** in `internal/cpu` (no cgo, no
-libunicorn): paged memory, all GPRs/RIP/RFLAGS/FS_BASE/GS_BASE, and a
-decoder/executor covering the core integer instruction set (data
-movement, ADD/OR/ADC/SBB/AND/SUB/XOR/CMP/TEST, INC/DEC/NOT/NEG,
-MUL/IMUL/DIV/IDIV, SHL/SHR/SAR/ROL/ROR, JMP/CALL/RET/Jcc, SETcc/
-CMOVcc, LEA including RIP-relative and SIB addressing), as well as
-core **SSE and AVX vector instructions** (including XMM/YMM registers, VEX
-prefixes, data movement, packed integer/float arithmetic, and conversions).
-See the package doc comment at the top of `internal/cpu/cpu.go` for exactly
-what's covered and what isn't yet (no x87, no string/REP instructions).
-It's exercised by an extensive test suite in `internal/cpu/*_test.go`
-that assemble real x86-64 via the host `as`/`objcopy` toolchain rather
-than hand-encoded byte literals, so the test fixtures themselves are
-trustworthy.
+This wasn't always the case — `internal/emulator` originally delegated
+execution to Unicorn Engine (a C library) via a hand-written cgo
+binding (`internal/uc`). `internal/cpu` was written from scratch to
+replace it, matching `uc.Engine`'s exact method surface
+(`MemMap`/`MemWrite`/`RegRead`/`HookInsn`/`EmuStart`/...) so the swap
+was small and mechanical rather than a rewrite of `internal/emulator`:
+paged memory, all GPRs/RIP/RFLAGS/FS_BASE/GS_BASE, a decoder/executor
+covering the core integer instruction set (data movement, ADD/OR/ADC/
+SBB/AND/SUB/XOR/CMP/TEST, INC/DEC/NOT/NEG, MUL/IMUL/DIV/IDIV, SHL/SHR/
+SAR/ROL/ROR, JMP/CALL/RET/Jcc, SETcc/CMOVcc, LEA including RIP-relative
+and SIB addressing, BT/BSF/BSR/POPCNT), string/REP instructions
+(MOVS/STOS/LODS/CMPS/SCAS), and core **SSE and AVX vector
+instructions** (including XMM/YMM registers, VEX prefixes, data
+movement, packed integer/float arithmetic, and conversions). See the
+package doc comment at the top of `internal/cpu/cpu.go` for exactly
+what's covered and what isn't yet (no x87, no MMX, no far jumps/IN/
+OUT). It's exercised by an extensive test suite in
+`internal/cpu/*_test.go` that assemble real x86-64 via the host
+`as`/`objcopy` toolchain rather than hand-encoded byte literals, so
+the test fixtures themselves are trustworthy.
 
-It is not wired into `internal/emulator` yet — that's the next step,
-and per the paragraph below it should be a small, mechanical one.
-
-If that day comes, the seam is already clean: `internal/emulator` only
-ever talks to `uc.Engine`'s small interface (`MemMap`/`MemWrite`/
-`RegRead`/`HookInsn`/`EmuStart`/...). A pure-Go engine implementing
-that same shape could drop in without touching `syscalls`, `vfs`,
-`procfs`, or `devices` at all. `internal/cpu.Engine` already mirrors
-that exact shape (same method names, same `Reg*`/`Ins*`/`Prot*`
-constant names) for exactly this reason — swapping it in means
-changing `internal/emulator`'s `engine *uc.Engine` field to
-`*cpu.Engine` and its `uc.RegRAX`-style constant references to
-`cpu.RegRAX`, not a rewrite.
+`internal/uc` still exists as a drop-in alternative backend, in case
+`internal/cpu`'s current instruction coverage ever turns out to be
+insufficient for some binary: swapping back (or running both side by
+side behind a flag) means changing `internal/emulator`'s `engine
+*cpu.Engine` field back to `*uc.Engine` and its `cpu.RegRAX`-style
+constant references back to `uc.RegRAX`, not a rewrite.

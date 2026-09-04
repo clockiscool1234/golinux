@@ -22,8 +22,8 @@
 //	0x00007ffff7fc0000   dynamic linker (PT_INTERP) base, if present
 //	0x00007ffffffde000   process stack (grows down from here)
 //
-// This first pass supports enough to run a simple statically linked
-// (no PT_INTERP) hello-world binary end to end: ELF loading, stack/
+// This covers ELF loading (including PT_INTERP dynamically-linked
+// binaries, which get their own load bias and entry point), stack/
 // auxv setup, and the syscalls in the internal/syscalls package.
 package emulator
 
@@ -571,7 +571,7 @@ func (p *Process) onMemUnmapped(e *cpu.Engine, memType int, addr uint64, size in
 }
 
 // execImage replaces the process's current image in place: a fresh
-// Unicorn engine is opened (the old one is closed first -- Unicorn
+// cpu.Engine is opened (the old one is closed first -- engine
 // contexts can't be "reset" short of closing and reopening), memory
 // bookkeeping (mmap/brk/fsbase) is reset to a clean slate, and the
 // new ELF is loaded exactly like the initial Load(). The fd table is

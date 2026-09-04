@@ -127,8 +127,8 @@ func resolve(proc Proc, dirfd int32, path string) (string, int) {
 // followSymlinks resolves a path through any VFS-level symlinks along
 // the way (both the final component and any intermediate directory),
 // the way a real path lookup would. Ported from sysemu/syscalls.py's
-// _follow_symlinks, minus the /proc-specific branch (procfs isn't
-// ported yet -- see the TODO in syscalls.go).
+// _follow_symlinks, minus the /proc-specific branch (procfs paths are
+// synthetic and have no VFS-level symlinks to resolve).
 func followSymlinks(proc Proc, path string) string {
 	if path == "" {
 		return path

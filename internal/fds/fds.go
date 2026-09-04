@@ -1,9 +1,8 @@
-// Package fds implements a minimal file descriptor table, ported from
-// sysemu/fds.py. This first pass only covers what's needed to run a
-// simple static hello-world binary: stdio streams and plain
-// VFS-backed regular files. More entry kinds (pipes, sockets,
-// directory handles) will be added alongside the syscalls that need
-// them.
+// Package fds implements a file descriptor table, ported from
+// sysemu/fds.py. It covers stdio streams, plain VFS-backed regular
+// files, directory handles (for getdents64), and host-backed pipes.
+// Sockets are the one entry kind not yet added, alongside the
+// syscalls that would need them.
 package fds
 
 import (

@@ -2,7 +2,7 @@
 
 A non-interactive AMD64 Linux syscall emulator, written in Go. It loads
 a real x86-64 ELF binary, executes its machine code instruction-by-
-instruction through [Unicorn Engine](https://www.unicorn-engine.org/),
+instruction through its own custom x86_64 CPU emulator,
 and intercepts every syscall to redirect it into a virtual filesystem
 instead of the host kernel — the guest program genuinely believes it's
 running on Linux, but never touches your real `/`.
@@ -20,11 +20,11 @@ user-mode emulation or `ptrace`-based sandboxes than to Docker.
         │
         ▼
  ┌─────────────┐    parse headers, PT_LOAD segments
- │  elfload    │───────────────────────────────────┐
- └─────────────┘                                    │
-                                                      ▼
- ┌─────────────┐   map segments, set up stack/auxv,  ┌───────────┐
- │  emulator   │──install SYSCALL/CPUID hooks───────▶│  uc (cgo) │
+ │  elfload    │────────────────────────────────────────────┐
+ └─────────────┘                                            │
+                                                            ▼
+ ┌─────────────┐   map segments, set up stack/auxv,   ┌───────────┐
+ │  emulator   │──install SYSCALL/CPUID hooks────────▶│  uc (cgo) │
  │  (Process)  │                                      │ Unicorn   │
  └──────┬──────┘◀─────────────────────────────────────┤  Engine   │
         │        every SYSCALL instruction traps here └───────────┘
@@ -33,7 +33,7 @@ user-mode emulation or `ptrace`-based sandboxes than to Docker.
  │  syscalls   │  ~60 syscall handlers, dispatched by number
  └──────┬──────┘
         │
-   ┌────┼────────────┬─────────────┬─────────────┐
+   ┌────┼─────────────┬─────────────┬─────────────┐
    ▼    ▼             ▼             ▼             ▼
  ┌────┐┌──────┐   ┌────────┐   ┌────────┐    ┌─────────┐
  │vfs ││ fds  │   │ procfs │   │devices │    │  (none) │

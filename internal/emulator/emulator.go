@@ -31,11 +31,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golinux/internal/consts"
 	"golinux/internal/cpu"
 	"golinux/internal/elfload"
+	"golinux/internal/errno"
 	"golinux/internal/fds"
 	"golinux/internal/syscalls"
 	"golinux/internal/vfs"
@@ -76,6 +79,7 @@ type Process struct {
 	Envp        []string
 	CwdVal      string
 	Pid_        int
+	PpidVal     int // 0 for the root process (no guest parent); set by doFork for children
 	VerboseFlag bool
 	LogFn       func(string)
 	HostnameVal string
@@ -136,6 +140,7 @@ func (p *Process) Fds() *fds.Table                               { return p.fds 
 func (p *Process) VFS() *vfs.VFS                                 { return p.VFSRoot }
 func (p *Process) SetVFS(vv *vfs.VFS)                            { p.VFSRoot = vv }
 func (p *Process) Pid() int                                      { return p.Pid_ }
+func (p *Process) Ppid() int                                     { return p.PpidVal }
 func (p *Process) Argv() []string                                { return p.ArgvVal }
 func (p *Process) BootTime() int64                               { return p.BootTimeVal }
 func (p *Process) Verbose() bool                                 { return p.VerboseFlag }
@@ -498,6 +503,7 @@ func (p *Process) onSyscall(e *cpu.Engine) {
 	a3, _ := e.RegRead(cpu.RegR10)
 	a4, _ := e.RegRead(cpu.RegR8)
 	a5, _ := e.RegRead(cpu.RegR9)
+	rip, _ := e.RegRead(cpu.RegRIP)
 
 	name, ok := consts.SyscallNames[int(num)]
 	if !ok {
@@ -515,6 +521,22 @@ func (p *Process) onSyscall(e *cpu.Engine) {
 		p.pendingExec = execve
 		_ = e.EmuStop()
 		return
+	}
+	if fork, isFork := err.(*syscalls.Fork); isFork {
+		// e's RIP hasn't advanced past the 2-byte SYSCALL instruction
+		// yet at this point (see cpu.Engine.HookInsn's doc comment),
+		// so rip+2 is where both the parent (falling through below,
+		// same as any other syscall) and the new child (about to
+		// start running on its own goroutine) resume once fork()
+		// "returns" -- 0 in the child, the child's pid in the parent.
+		if childPid := p.doFork(fork.Vfork, rip+2); childPid < 0 {
+			ret = int64(-errno.ENOMEM)
+		} else {
+			ret = int64(childPid)
+		}
+		// No EmuStop() here, unlike Stop/Execve above: the parent's
+		// own engine was never touched by the fork, so it just
+		// continues exactly like it would after any other syscall.
 	}
 
 	if p.VerboseFlag {
@@ -595,6 +617,233 @@ func (p *Process) execImage(hostPath string, argv, envp []string) error {
 		p.Envp = envp
 	}
 	return p.Load(hostPath)
+}
+
+// -- fork / wait4 -----------------------------------------------------------
+//
+// See internal/syscalls/fork.go's package doc comment for the full
+// rationale (why this doesn't call the real fork(2), and what's
+// simplified). In short: a "child" here is a full deep copy of the
+// parent's CPU state and fd table, given a synthetic pid and run
+// forward on its own goroutine -- never a real host process.
+//
+// childRecord/registry/childrenOf together are the minimal
+// bookkeeping wait4() needs: given a parent pid, find its children
+// (live or exited-but-unreaped, i.e. zombies) and block until one
+// matching a requested pid exits. A flat, package-level registry
+// (rather than something hung off each *Process) is enough because
+// any process anywhere in the fork tree might have children, and
+// wait4() only ever needs *this* process's own direct children.
+
+// childRecord tracks one forked child from doFork until some wait4()
+// call reaps it.
+type childRecord struct {
+	pid  int
+	done chan struct{} // closed exactly once, right after the child's Run() returns
+
+	// exitCode is only meaningful after done is closed; reaped is only
+	// ever set (to true) by the one goroutine driving the parent that
+	// owns this record, since only that goroutine ever calls Wait4 on
+	// it -- but both are still guarded by registryMu because they're
+	// also read by unrelated goroutines want to enumerate this
+	// parent's children (there are none today, but future code -- a
+	// /proc/<pid>/status "State: Z" line, say -- would want to).
+	exitCode int
+	reaped   bool
+}
+
+var (
+	registryMu sync.Mutex
+	childrenOf = map[int][]*childRecord{} // ppid -> that parent's children, live + unreaped zombies
+
+	// nextChildPid counts up from childPidBase for every fork().
+	// Guest pids handed to children are synthetic (see fork.go), so
+	// this just needs to be unique within one run, not to resemble a
+	// real pid_t sequence.
+	nextChildPid = int64(childPidBase)
+)
+
+// childPidBase is chosen comfortably above any pid a real Linux
+// system hands out by default (/proc/sys/kernel/pid_max is 4194304
+// even at its largest configurable value) so synthetic child pids can
+// never collide with the root process's real os.Getpid() (see
+// NewProcess) within a single run.
+const childPidBase = 1 << 23
+
+func allocChildPid() int {
+	return int(atomic.AddInt64(&nextChildPid, 1))
+}
+
+// doFork is what internal/syscalls.Fork actually triggers (see
+// onSyscall): it deep-copies p into a new, independent *Process --
+// its own cpu.Engine (registers + every mapped page) and its own
+// fds.Table (new table, same underlying Files -- see fds.Table.Clone
+// for why that's the correct shared-open-file-description behavior)
+// -- assigns it a synthetic pid, and runs it forward on a new
+// goroutine starting at resumeRIP. It returns the child's pid (for
+// the parent's RAX), or -1 if the child engine's hooks failed to
+// install (fork() reporting ENOMEM to the guest, same as a real
+// kernel out of resources -- this codepath doesn't actually allocate
+// host memory beyond the copies already made, but there's no more
+// specific real-world errno for "internal setup failed").
+func (p *Process) doFork(vfork bool, resumeRIP uint64) int {
+	child := &Process{
+		VFSRoot:     p.VFSRoot, // shared: fork() shares the parent's mount namespace
+		ArgvVal:     append([]string(nil), p.ArgvVal...),
+		Envp:        append([]string(nil), p.Envp...),
+		CwdVal:      p.CwdVal,
+		Pid_:        allocChildPid(),
+		PpidVal:     p.Pid_,
+		VerboseFlag: p.VerboseFlag,
+		LogFn:       p.LogFn,
+		HostnameVal: p.HostnameVal,
+		BootTimeVal: p.BootTimeVal,
+
+		engine: p.engine.Clone(),
+		fds:    p.fds.Clone(),
+
+		mmapNext:     p.mmapNext,
+		brkStart:     p.brkStart,
+		brkCur:       p.brkCur,
+		brkMappedEnd: p.brkMappedEnd,
+		fsbase:       p.fsbase,
+		umask:        p.umask,
+
+		uid: p.uid, gid: p.gid, euid: p.euid, egid: p.egid,
+		suid: p.suid, sgid: p.sgid, fsuid: p.fsuid, fsgid: p.fsgid,
+		groups: append([]uint32(nil), p.groups...),
+
+		entry: resumeRIP,
+	}
+	if err := child.installHooks(); err != nil {
+		p.Log(fmt.Sprintf("[fork] installing hooks on child engine: %v", err))
+		return -1
+	}
+	// fork() returns 0 in the child -- the parent's own RAX is set by
+	// onSyscall, from this function's return value.
+	_ = child.engine.RegWrite(cpu.RegRAX, 0)
+
+	rec := &childRecord{pid: child.Pid_, done: make(chan struct{})}
+	registryMu.Lock()
+	childrenOf[p.Pid_] = append(childrenOf[p.Pid_], rec)
+	registryMu.Unlock()
+
+	kind := "fork"
+	if vfork {
+		kind = "vfork"
+	}
+	p.Log(fmt.Sprintf("[%s] spawned child pid %d", kind, child.Pid_))
+
+	go func() {
+		code, runErr := child.Run()
+		if runErr != nil {
+			child.Log(fmt.Sprintf("[%s] child exited abnormally: %v", kind, runErr))
+			code = 128
+		}
+		registryMu.Lock()
+		rec.exitCode = code
+		registryMu.Unlock()
+		close(rec.done)
+	}()
+
+	return child.Pid_
+}
+
+// Wait4 implements wait4(2) against p's own forked children. It
+// blocks the calling goroutine when no matching child has exited yet
+// (unless WNOHANG is set) -- which is exactly right here: that
+// goroutine IS this guest process's only thread of execution, so
+// parking it until a child changes state is precisely what a real,
+// single-threaded wait4() call does to its one and only thread.
+//
+// pid follows wait4(2)'s convention (< -1: process group, -1: any
+// child, 0: any child in the caller's process group, > 0: that
+// specific child) except that this port doesn't model guest process
+// groups, so 0 and negative-but-not-(-1) values are treated the same
+// as -1 ("any child") -- a safe, documented simplification, since no
+// guest program this emulator targets relies on process-group-scoped
+// waiting.
+func (p *Process) Wait4(pid int64, wstatusPtr uint64, options int) (int64, error) {
+	const wnohang = 1
+
+	any := pid <= 0
+	matches := func(r *childRecord) bool { return !r.reaped && (any || int64(r.pid) == pid) }
+
+	registryMu.Lock()
+	var candidates []*childRecord
+	for _, r := range childrenOf[p.Pid_] {
+		if matches(r) {
+			candidates = append(candidates, r)
+		}
+	}
+	registryMu.Unlock()
+
+	if len(candidates) == 0 {
+		return int64(-errno.ECHILD), nil
+	}
+
+	var rec *childRecord
+	for _, r := range candidates {
+		select {
+		case <-r.done:
+			rec = r
+		default:
+		}
+		if rec != nil {
+			break
+		}
+	}
+
+	if rec == nil {
+		if options&wnohang != 0 {
+			return 0, nil
+		}
+		rec = waitAnyChild(candidates)
+	}
+
+	registryMu.Lock()
+	rec.reaped = true
+	exitCode, childPid := rec.exitCode, rec.pid
+	registryMu.Unlock()
+
+	if wstatusPtr != 0 {
+		// Bits 8-15 hold the exit status for a normally-exited child
+		// (WIFEXITED true iff the low byte is 0, WEXITSTATUS reads
+		// bits 8-15) -- exit()/exit_group() already mask their code
+		// to a byte (see exit.go), so this matches real wait(2)
+		// encoding exactly for every code this emulator can produce.
+		status := uint32(exitCode&0xff) << 8
+		buf := make([]byte, 4)
+		binary.LittleEndian.PutUint32(buf, status)
+		_ = p.MemWrite(wstatusPtr, buf)
+	}
+	return int64(childPid), nil
+}
+
+// waitAnyChild blocks until at least one of recs is done and returns
+// it. For the common single-candidate case (a specific-pid wait, or
+// an only child) it just waits on that one channel directly; for
+// several candidates (a "wait for any child" call with more than one
+// live child) it fans their done channels into one via a short-lived
+// helper goroutine per candidate, each of which exits the instant its
+// channel closes.
+func waitAnyChild(recs []*childRecord) *childRecord {
+	if len(recs) == 1 {
+		<-recs[0].done
+		return recs[0]
+	}
+	winner := make(chan *childRecord, len(recs))
+	for _, r := range recs {
+		r := r
+		go func() {
+			<-r.done
+			select {
+			case winner <- r:
+			default:
+			}
+		}()
+	}
+	return <-winner
 }
 
 // -- run ------------------------------------------------------------------

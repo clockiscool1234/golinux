@@ -90,7 +90,18 @@ type modrmResult struct {
 // decodeModRM reads the ModRM byte (and SIB/displacement bytes, if
 // the addressing mode calls for them) from c, using rexR/rexX/rexB to
 // extend the reg/index/base fields into the full 0-15 range.
-func decodeModRM(e *Engine, c *cursor, rexR, rexX, rexB bool) (modrmResult, error) {
+// rexPresent -- whether *any* REX prefix byte preceded this
+// instruction, regardless of which bits it set -- matters separately
+// from rexR/rexX/rexB: a register-direct (mod==3) r/m operand with a
+// raw encoding of 4-7 means the AH/CH/DH/BH high-byte registers when
+// no REX prefix is present at all, but SPL/BPL/SIL/DIL (or, extended
+// by rexB, R12B-R15B) when one is -- see Registers.read8/write8. That
+// distinction only matters for 8-bit operand widths, but decodeModRM
+// itself doesn't know the eventual operand width (callers apply it
+// via readOperand/writeOperand's width parameter), so it must record
+// rexPresent on the operand unconditionally and let read8/write8
+// decide whether it's relevant.
+func decodeModRM(e *Engine, c *cursor, rexPresent, rexR, rexX, rexB bool) (modrmResult, error) {
 	b, err := c.u8()
 	if err != nil {
 		return modrmResult{}, err
@@ -102,7 +113,7 @@ func decodeModRM(e *Engine, c *cursor, rexR, rexX, rexB bool) (modrmResult, erro
 	regField := int(regRaw) | boolBit(rexR)<<3
 
 	if mod == 3 {
-		return modrmResult{regField: regField, rm: regOperand(int(rmRaw)|boolBit(rexB)<<3, true)}, nil
+		return modrmResult{regField: regField, rm: regOperand(int(rmRaw)|boolBit(rexB)<<3, rexPresent)}, nil
 	}
 
 	var base, index uint64

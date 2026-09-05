@@ -49,7 +49,7 @@ func (e *Engine) decodeTwoByte(
 
 	case op2 >= 0x90 && op2 <= 0x9F: // SETcc r/m8
 		cc := int(op2 - 0x90)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -65,7 +65,7 @@ func (e *Engine) decodeTwoByte(
 	case op2 >= 0x40 && op2 <= 0x4F: // CMOVcc
 		cc := int(op2 - 0x40)
 		w := width(false)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -88,7 +88,7 @@ func (e *Engine) decodeTwoByte(
 			srcW = 2
 		}
 		dstW := width(false)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -108,7 +108,7 @@ func (e *Engine) decodeTwoByte(
 			srcW = 2
 		}
 		dstW := width(false)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +124,7 @@ func (e *Engine) decodeTwoByte(
 
 	case op2 == 0xAF: // IMUL r, r/m
 		w := width(false)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -143,7 +143,7 @@ func (e *Engine) decodeTwoByte(
 		})
 
 	case op2 == 0x1F: // multi-byte NOP
-		if _, err := decodeModRM(e, c, rexR, rexX, rexB); err != nil {
+		if _, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB); err != nil {
 			return nil, err
 		}
 		return finish(func(e *Engine) (bool, error) { return false, nil })
@@ -153,7 +153,7 @@ func (e *Engine) decodeTwoByte(
 			c.pos++
 			return finish(func(e *Engine) (bool, error) { return false, nil })
 		}
-		if _, err := decodeModRM(e, c, rexR, rexX, rexB); err != nil {
+		if _, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB); err != nil {
 			return nil, err
 		}
 		return finish(func(e *Engine) (bool, error) { return false, nil })
@@ -161,7 +161,7 @@ func (e *Engine) decodeTwoByte(
 	// ── SHLD / SHRD ───────────────────────────────────────────────────
 	case op2 == 0xA4, op2 == 0xA5: // SHLD r/m, r, imm8 / SHLD r/m, r, CL
 		w := width(false)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -206,7 +206,7 @@ func (e *Engine) decodeTwoByte(
 
 	case op2 == 0xAC, op2 == 0xAD: // SHRD r/m, r, imm8 / SHRD r/m, r, CL
 		w := width(false)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +251,7 @@ func (e *Engine) decodeTwoByte(
 
 	// ── BT / BSF / BSR / POPCNT / LZCNT ─────────────────────────────────
 	case op2 == 0xA3, op2 == 0xAB, op2 == 0xB3, op2 == 0xBB: // BT/BTS/BTR/BTC r/m, r
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -295,7 +295,7 @@ func (e *Engine) decodeTwoByte(
 			return false, nil // BT: no write
 		})
 	case op2 == 0xBA: // BT/BTS/BTR/BTC r/m, imm8
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -326,7 +326,7 @@ func (e *Engine) decodeTwoByte(
 	case op2 == 0xB0, op2 == 0xB1: // CMPXCHG r/m, r
 		byteOp := op2 == 0xB0
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -359,7 +359,7 @@ func (e *Engine) decodeTwoByte(
 			return false, e.writeOperand(accReg, w, dest)
 		})
 	case op2 == 0xBC: // BSF r, r/m
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -394,7 +394,7 @@ func (e *Engine) decodeTwoByte(
 			return false, e.writeOperand(reg, w, count)
 		})
 	case op2 == 0xBD: // BSR r, r/m  (or LZCNT with F3 prefix)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -431,7 +431,7 @@ func (e *Engine) decodeTwoByte(
 			return false, e.writeOperand(reg, w, count)
 		})
 	case op2 == 0xB8 && rep == repZ: // POPCNT r, r/m (F3 0F B8)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -488,7 +488,7 @@ func (e *Engine) decodeSSE0F(
 ) (*decoded, error) {
 	// Helper: decode ModRM and return (xmmDst operand, xmmSrc operand, regField).
 	decodeMR := func() (dst, src operand, rf int, err error) {
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return operand{}, operand{}, 0, err
 		}
@@ -1339,7 +1339,7 @@ func (e *Engine) decodeSSE0F(
 		if !sseInt {
 			break
 		}
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -1369,7 +1369,7 @@ func (e *Engine) decodeSSE0F(
 		if !sseInt {
 			break
 		}
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -1399,7 +1399,7 @@ func (e *Engine) decodeSSE0F(
 		if !sseInt {
 			break
 		}
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -1525,7 +1525,7 @@ func (e *Engine) decodeSSE0F(
 		})
 
 	case 0xAE: // group 15: LDMXCSR /2  STMXCSR /3
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -2215,7 +2215,7 @@ func (e *Engine) decodeThreeByte38(
 	}
 
 	decodeMR2 := func() (dst, src operand, err error) {
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return operand{}, operand{}, err
 		}
@@ -2399,7 +2399,7 @@ func (e *Engine) decodeThreeByte3A(
 	}
 
 	decodeMR2 := func() (dst, src operand, err error) {
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return operand{}, operand{}, err
 		}
@@ -2680,7 +2680,7 @@ func (e *Engine) decodeVexInsn(
 	zu := true       // VEX writes always apply zero-upper rule for register targets
 
 	decodeMR2 := func() (dst, src operand, err error) {
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return operand{}, operand{}, err
 		}
@@ -2689,7 +2689,7 @@ func (e *Engine) decodeVexInsn(
 		return reg, rm, nil
 	}
 	decodeMR3 := func() (dst, src1Reg int, src2 operand, err error) {
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return 0, 0, operand{}, err
 		}

@@ -212,6 +212,36 @@ func TestByteRegisters(t *testing.T) {
 	}
 }
 
+// TestMovzxHighByteRegisterNoRex is a regression test for a real bug
+// found while implementing fork()/wait4(): with no REX prefix, a
+// ModRM register-direct r/m operand encoded as 4-7 means the legacy
+// %ah/%ch/%dh/%bh high-byte registers, not %spl/%bpl/%sil/%dil (that
+// meaning only applies once a REX prefix -- any REX prefix, not just
+// one that sets the relevant extension bit -- is present). decodeModRM
+// used to hardcode "REX present" for every register-direct r/m
+// operand regardless of whether the instruction actually had a REX
+// prefix, so `movzbl %ah,%ecx` silently read %spl's low byte instead
+// of %rax's high byte whenever no REX prefix preceded it.
+//
+// This isn't a hypothetical instruction pattern: it's exactly what
+// glibc/musl's WEXITSTATUS() macro compiles down to right after a
+// wait4() call at -O1/-O2 (`mov 0x4(%rsp),%eax; movzbl %ah,%ecx`),
+// which is how this was actually found -- a forked child's real exit
+// code came back mangled through a musl binary's own optimized
+// WEXITSTATUS(), even though the emulator's wait4 implementation was
+// writing the correct wait-status word into guest memory.
+func TestMovzxHighByteRegisterNoRex(t *testing.T) {
+	e := runUntilEnd(t, `
+		movabs $0x2A00, %rax
+		xor %ecx, %ecx
+		movzbl %ah, %ecx
+	`)
+	if got, want := reg(t, e, RegRCX), uint64(0x2A); got != want {
+		rsp := reg(t, e, RegRSP)
+		t.Fatalf("movzbl %%ah,%%ecx = %#x, want %#x (bug symptom: reads %%spl = rsp&0xff = %#x instead of %%ah)", got, want, rsp&0xff)
+	}
+}
+
 func TestMovzxMovsxFromMemory(t *testing.T) {
 	code := assemble(t, `
 		mov $0x600000, %rbx

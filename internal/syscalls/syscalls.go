@@ -70,6 +70,23 @@ type Execve struct {
 
 func (e *Execve) Error() string { return "execve: " + e.Path }
 
+// Fork is returned by fork()/vfork()/clone() (the process-shaped
+// forms of clone -- see fork.go) to unwind out of onSyscall so
+// internal/emulator's Process.onSyscall -- which owns the *cpu.Engine
+// and can actually clone it -- can spawn the child. This package
+// can't do that cloning itself: it only has the narrow, duck-typed
+// Proc interface below, precisely to avoid importing internal/emulator
+// (which would be a circular import, since emulator imports this
+// package). See fork.go's doc comment for the overall design.
+type Fork struct {
+	// Vfork records that this came from vfork() (or a clone() call
+	// with CLONE_VFORK set) purely for logging; see fork.go for why
+	// it's otherwise handled identically to a plain fork().
+	Vfork bool
+}
+
+func (f *Fork) Error() string { return "fork" }
+
 // Proc is everything a syscall handler needs from the owning process.
 // emulator.Process implements this; this package does not import the
 // emulator package, avoiding a circular dependency (mirroring how
@@ -82,8 +99,18 @@ type Proc interface {
 	VFS() *vfs.VFS
 	SetVFS(*vfs.VFS) // used by chroot/pivot_root to swap the guest's view of "/"
 	Pid() int
+	Ppid() int
 	Argv() []string
 	BootTime() int64
+
+	// Wait4 implements the wait4(2) syscall against this process's
+	// children (see fork.go/emulator.Process.Wait4 for the child
+	// registry fork() populates). It's a full Proc method rather than
+	// a Fork-shaped control-flow signal because, unlike fork(), it
+	// doesn't need engine-cloning access -- everything it needs
+	// (the child registry, MemWrite for *wstatus) is already
+	// reachable through Proc.
+	Wait4(pid int64, wstatusPtr uint64, options int) (int64, error)
 
 	Cwd() string
 	SetCwd(path string)

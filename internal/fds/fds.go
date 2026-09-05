@@ -328,6 +328,27 @@ func (t *Table) Close(fd int) bool {
 	return true
 }
 
+// Clone returns a new Table with the same fd numbers pointing at the
+// same underlying Files -- the fd-table half of what fork() needs
+// (see internal/emulator's doFork). This deliberately duplicates
+// entries rather than deep-copying the Files themselves: real
+// fork(2) gives the child fds that share the *same* open file
+// description (and therefore the same seek offset) as the parent's,
+// and since every File here that has a meaningful offset (*VFSFile)
+// wraps a real *os.File pointer, copying the map but reusing the same
+// File values reproduces exactly that sharing for free. *os.File's
+// methods are safe for concurrent use by multiple goroutines, so a
+// parent and child both holding it and issuing reads/writes
+// concurrently is safe the same way two threads sharing an fd in a
+// real process is.
+func (t *Table) Clone() *Table {
+	out := &Table{entries: make(map[int]File, len(t.entries)), next: t.next}
+	for fd, f := range t.entries {
+		out.entries[fd] = f
+	}
+	return out
+}
+
 // Dup allocates a new fd pointing at the same File as oldfd.
 func (t *Table) Dup(oldfd int) (int, bool) {
 	f, ok := t.entries[oldfd]

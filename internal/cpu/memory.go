@@ -86,6 +86,27 @@ func (m *Memory) MemProtect(addr, size uint64, perms int) error {
 	return nil
 }
 
+// Clone returns a deep copy of m: every mapped page is duplicated
+// (fresh backing array, same protection bits) so that writes through
+// the clone never touch the original's pages or vice versa. Used by
+// fork()/vfork() (see internal/emulator's doFork) to give a child
+// process its own private copy of the parent's address space --
+// real fork(2) gets this "for free" via copy-on-write page tables;
+// this emulator has no host MMU to lean on, so it pays the full copy
+// up front instead. That's the right tradeoff here: guest programs
+// are typically small, and correctness (a genuinely independent
+// address space, no risk of parent/child accidentally aliasing pages)
+// matters far more than the copy's cost for this emulator's use case.
+func (m *Memory) Clone() *Memory {
+	out := &Memory{pages: make(map[uint64]*page, len(m.pages))}
+	for addr, p := range m.pages {
+		np := &page{perm: p.perm}
+		np.data = p.data // [pageSize]byte is an array (value type): this copies the bytes
+		out.pages[addr] = np
+	}
+	return out
+}
+
 // MemWrite/MemRead are the "direct host access" API: they bypass
 // per-page protection bits (matching uc_mem_write/uc_mem_read, which
 // let the emulator host poke guest memory the guest itself mapped

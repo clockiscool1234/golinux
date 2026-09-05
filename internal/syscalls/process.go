@@ -2,6 +2,7 @@ package syscalls
 
 import (
 	"encoding/binary"
+	"os"
 	"syscall"
 
 	"golinux/internal/consts"
@@ -41,12 +42,21 @@ func init() {
 // --------------------------------------------------------------------------
 // pid / process-group / session
 //
-// Guest pids are real host pids (this Go process's own pid --
-// multi-process guest trees aren't modeled, see fork.go), so the
-// process-group/session calls just ask the real kernel, matching
-// sysemu/syscalls.py's rationale: that's what lets job control
-// (TIOCSPGRP/TIOCGPGRP, Ctrl-Z, etc.) work against the real terminal
-// driver instead of being a fiction the tty never hears about.
+// Guest pids used to always be real host pids (this Go process's own
+// pid), since multi-process guest trees weren't modeled. fork() (see
+// fork.go) changes that: a forked child gets a synthetic pid, not a
+// real one, because it's still just another goroutine inside this
+// same host OS process, not a separate one the host kernel knows
+// about.
+//
+// The process-group/session calls below still need to ask the *real*
+// kernel, though -- that's what lets job control (TIOCSPGRP/
+// TIOCGPGRP, Ctrl-Z, etc.) work against the real terminal driver
+// instead of being a fiction the tty never hears about. So "self"
+// (pid <= 0) here always resolves to os.Getpid(), the one real host
+// process backing every guest process/goroutine in this run, rather
+// than proc.Pid() -- which, for a forked child, wouldn't correspond
+// to any real process the host kernel could look up.
 // --------------------------------------------------------------------------
 
 func sysGetpid(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
@@ -54,7 +64,10 @@ func sysGetpid(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
 }
 
 func sysGetppid(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
-	return 1, nil
+	if ppid := proc.Ppid(); ppid != 0 {
+		return int64(ppid), nil
+	}
+	return 1, nil // the root process has no guest parent; report pid 1, as if reparented to init
 }
 
 func sysGetpgrp(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
@@ -68,7 +81,7 @@ func sysGetpgrp(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
 func sysGetpgid(proc Proc, pid, _, _, _, _, _ uint64) (int64, error) {
 	realPid := int(int32(pid))
 	if realPid <= 0 {
-		realPid = proc.Pid()
+		realPid = os.Getpid()
 	}
 	pgid, err := syscall.Getpgid(realPid)
 	if err != nil {
@@ -80,7 +93,7 @@ func sysGetpgid(proc Proc, pid, _, _, _, _, _ uint64) (int64, error) {
 func sysSetpgid(proc Proc, pid, pgid, _, _, _, _ uint64) (int64, error) {
 	realPid := int(int32(pid))
 	if realPid <= 0 {
-		realPid = proc.Pid()
+		realPid = os.Getpid()
 	}
 	realPgid := int(int32(pgid))
 	if realPgid <= 0 {
@@ -95,7 +108,7 @@ func sysSetpgid(proc Proc, pid, pgid, _, _, _, _ uint64) (int64, error) {
 func sysGetsid(proc Proc, pid, _, _, _, _, _ uint64) (int64, error) {
 	realPid := int(int32(pid))
 	if realPid <= 0 {
-		realPid = proc.Pid()
+		realPid = os.Getpid()
 	}
 	// syscall.Getsid isn't wrapped by the Go standard library on
 	// linux/amd64 (unlike Getpgid/Setpgid/Setsid); go straight to the

@@ -161,6 +161,12 @@ type VFS struct {
 	Root        string
 	NativePerms bool
 
+	// mu guards mounts/mountsMTime. A single *VFS is shared by every
+	// process in a fork() tree (fork gives the child the same mount
+	// namespace as the parent -- see internal/emulator's doFork), so
+	// once a guest program forks, this map can genuinely be read and
+	// written from more than one goroutine at the same time; every
+	// method that touches it below takes mu for its whole body.
 	mu          sync.Mutex
 	mounts      map[string]MountInfo
 	mountsMTime int64 // ns; -1 means "no file seen yet"
@@ -193,7 +199,11 @@ func New(root string, nativePerms bool) (*VFS, error) {
 // RefreshMounts is the public entrypoint for callers outside this
 // package (e.g. the syscalls package) that need to consult the mount
 // table directly instead of going through MountType()/MountPointFor().
-func (v *VFS) RefreshMounts() { v.refreshMounts() }
+func (v *VFS) RefreshMounts() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.refreshMounts()
+}
 
 func (v *VFS) mountsFile() string {
 	return filepath.Join(v.Root, ".golinux_mounts.json")
@@ -787,6 +797,8 @@ func (v *VFS) Mount(source, target, fstype string, flags int, data string) error
 			return err
 		}
 	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.refreshMounts()
 	if source == "" {
 		source = "none"
@@ -798,6 +810,8 @@ func (v *VFS) Mount(source, target, fstype string, flags int, data string) error
 // Umount removes a mount registered at target.
 func (v *VFS) Umount(target string) error {
 	target = normPath(target)
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.refreshMounts()
 	if _, ok := v.mounts[target]; !ok {
 		return newErr(22, "") // EINVAL: not a mountpoint we know about
@@ -809,6 +823,8 @@ func (v *VFS) Umount(target string) error {
 // MountType returns the fstype of the most specific mount covering
 // guestPath, or "" if it's just plain host-backed storage.
 func (v *VFS) MountType(guestPath string) string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.refreshMounts()
 	guestPath = normPath(guestPath)
 	best, bestLen := "", -1
@@ -825,6 +841,8 @@ func (v *VFS) MountType(guestPath string) string {
 // MountPointFor returns the most specific mountpoint covering
 // guestPath, or "" if none.
 func (v *VFS) MountPointFor(guestPath string) string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.refreshMounts()
 	guestPath = normPath(guestPath)
 	best, bestLen := "", -1
@@ -843,6 +861,8 @@ func (v *VFS) MountPointFor(guestPath string) string {
 // meaningful in Go either -- matches the Python note that dict
 // insertion order is "close enough").
 func (v *VFS) MountsList() []MountRow {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.refreshMounts()
 	out := make([]MountRow, 0, len(v.mounts))
 	for mp, info := range v.mounts {

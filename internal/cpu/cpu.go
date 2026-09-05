@@ -204,6 +204,24 @@ func NewEngine() (*Engine, error) {
 // with uc.Engine.Close.
 func (e *Engine) Close() error { return nil }
 
+// Clone returns a new Engine with an independent, deep copy of e's
+// registers and memory -- the CPU-level half of what fork() needs
+// (see internal/emulator's doFork for the process-level half: fd
+// table, VFS handle, credentials, etc.). Hooks are deliberately NOT
+// copied: HookInsn/HookMemUnmapped closures captured *this* engine's
+// pointer as their receiver's target implicitly via the owning
+// Process, so the caller must re-install hooks on the clone (bound to
+// whatever Process object now owns it) before running it -- copying
+// stale closures here would silently keep the parent's engine as the
+// hook target instead.
+func (e *Engine) Clone() *Engine {
+	return &Engine{
+		regs:      e.regs, // Registers is all fixed-size arrays/scalars: this is a deep copy
+		mem:       e.mem.Clone(),
+		insnHooks: make(map[int]insnHook),
+	}
+}
+
 // -- memory -----------------------------------------------------------
 
 func (e *Engine) MemMap(addr, size uint64, perms int) error {

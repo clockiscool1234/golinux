@@ -295,7 +295,7 @@ legacyPrefixes:
 		case 0, 1, 2, 3: // Eb,Gb / Ev,Gv / Gb,Eb / Gv,Ev
 			byteOp := form == 0 || form == 2
 			w := width(byteOp)
-			mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+			mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 			if err != nil {
 				return nil, err
 			}
@@ -337,7 +337,7 @@ legacyPrefixes:
 	case op == 0x80, op == 0x81, op == 0x83: // group1: r/m, imm
 		byteOp := op == 0x80
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -379,7 +379,7 @@ legacyPrefixes:
 	case op == 0x84, op == 0x85: // TEST r/m, r
 		byteOp := op == 0x84
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -433,7 +433,7 @@ legacyPrefixes:
 	case op == 0x88, op == 0x89, op == 0x8A, op == 0x8B:
 		byteOp := op == 0x88 || op == 0x8A
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -453,7 +453,7 @@ legacyPrefixes:
 	case op == 0xC6, op == 0xC7: // MOV r/m, imm
 		byteOp := op == 0xC6
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -515,7 +515,7 @@ legacyPrefixes:
 
 	// -- LEA ----------------------------------------------------------
 	case op == 0x8D:
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -565,7 +565,7 @@ legacyPrefixes:
 	case op == 0x86, op == 0x87:
 		byteOp := op == 0x86
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -590,7 +590,7 @@ legacyPrefixes:
 	case op == 0x0F:
 		return e.decodeTwoByte(c, rexPresent, rexW, rexR, rexX, rexB, opSize16, rep, applySeg, width, finish)
 	case op == 0x63: // MOVSXD r64, r/m32
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -607,7 +607,7 @@ legacyPrefixes:
 	// -- IMUL r,r/m,imm -----------------------------------------------
 	case op == 0x69, op == 0x6B:
 		w := width(false)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -645,7 +645,7 @@ legacyPrefixes:
 	case op == 0xF6, op == 0xF7:
 		byteOp := op == 0xF6
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -685,7 +685,7 @@ legacyPrefixes:
 	case op == 0xFE, op == 0xFF:
 		byteOp := op == 0xFE
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}
@@ -745,7 +745,7 @@ legacyPrefixes:
 	case op == 0xC0, op == 0xC1, op == 0xD0, op == 0xD1, op == 0xD2, op == 0xD3:
 		byteOp := op == 0xC0 || op == 0xD0 || op == 0xD2
 		w := width(byteOp)
-		mr, err := decodeModRM(e, c, rexR, rexX, rexB)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
 			return nil, err
 		}

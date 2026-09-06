@@ -49,9 +49,9 @@ func packStat(st vfs.Stat) []byte {
 }
 
 func doStat(proc Proc, path string, buf uint64, follow bool) (int64, error) {
-	p := path
+	p := resolveAbs(proc, path)
 	if follow {
-		p = followSymlinks(proc, path)
+		p = followSymlinks(proc, p)
 	}
 	if rel, ok := procRel(proc, p); ok {
 		st, ok := procfs.Stat(rel, proc)
@@ -124,7 +124,7 @@ func sysAccess(proc Proc, pathPtr, _, _, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	full := followSymlinks(proc, path)
+	full := followSymlinks(proc, resolveAbs(proc, path))
 	if rel, isProc := procRel(proc, full); isProc {
 		if !procfs.Exists(rel, proc) {
 			return int64(-errno.ENOENT), nil
@@ -164,7 +164,7 @@ func sysChmod(proc Proc, pathPtr, mode, _, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	path = followSymlinks(proc, path)
+	path = followSymlinks(proc, resolveAbs(proc, path))
 	if !proc.VFS().Exists(path) {
 		return int64(-errno.ENOENT), nil
 	}
@@ -185,7 +185,7 @@ func sysChown(proc Proc, pathPtr, uid, gid, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	path = followSymlinks(proc, path)
+	path = followSymlinks(proc, resolveAbs(proc, path))
 	if !proc.VFS().Exists(path) {
 		return int64(-errno.ENOENT), nil
 	}
@@ -198,6 +198,7 @@ func sysLchown(proc Proc, pathPtr, uid, gid, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
+	path = resolveAbs(proc, path)
 	if !proc.VFS().Exists(path) {
 		return int64(-errno.ENOENT), nil
 	}
@@ -250,7 +251,7 @@ func sysReadlink(proc Proc, pathPtr, buf, bufsiz, _, _, _ uint64) (int64, error)
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	return doReadlink(proc, path, buf, int(bufsiz))
+	return doReadlink(proc, resolveAbs(proc, path), buf, int(bufsiz))
 }
 
 func sysReadlinkat(proc Proc, dirfd, pathPtr, buf, bufsiz, _, _ uint64) (int64, error) {

@@ -243,7 +243,7 @@ func sysOpen(proc Proc, pathPtr, flags, mode, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	return openCommon(proc, path, int(flags), int(mode))
+	return openCommon(proc, resolveAbs(proc, path), int(flags), int(mode))
 }
 
 func sysOpenat(proc Proc, dirfd, pathPtr, flags, mode, _, _ uint64) (int64, error) {
@@ -263,7 +263,7 @@ func sysCreat(proc Proc, pathPtr, mode, _, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	return openCommon(proc, path, consts.O_CREAT|consts.O_WRONLY|consts.O_TRUNC, int(mode))
+	return openCommon(proc, resolveAbs(proc, path), consts.O_CREAT|consts.O_WRONLY|consts.O_TRUNC, int(mode))
 }
 
 func sysClose(proc Proc, fdNum, _, _, _, _, _ uint64) (int64, error) {

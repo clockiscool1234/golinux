@@ -224,7 +224,24 @@ func vfsErrno(err error) int {
 // procRel reports whether path falls under a `mount -t proc`'d
 // mountpoint, returning the path relative to that mountpoint if so.
 // Ported from sysemu/syscalls.py's _proc_rel.
+//
+// path is always run through resolveAbs first: MountType/
+// MountPointFor normalize internally and always compare/return
+// against a canonical leading-"/", dots-collapsed form, but the
+// TrimPrefix below needs that same canonical form on *this* side too
+// -- an uncollapsed path (relative, or absolute-but-containing "./"
+// or "..") would still correctly match MountType's "is this under a
+// proc mount" check, yet silently fail the TrimPrefix strip, leaving
+// the *entire original path* misread as a name *inside* procfs
+// instead of "" (the procfs root itself) -- turning `stat("proc")`
+// into the equivalent of `stat("/proc/proc")`. That exact bug shipped
+// once already (found via a real `ls ./proc` failing on every child
+// entry while `ls proc`/`ls /proc` worked); every caller today
+// resolves+canonicalizes before reaching here too, but this makes it
+// an invariant of procRel itself rather than something every future
+// caller has to remember.
 func procRel(proc Proc, path string) (string, bool) {
+	path = resolveAbs(proc, path)
 	if proc.VFS().MountType(path) != "proc" {
 		return "", false
 	}

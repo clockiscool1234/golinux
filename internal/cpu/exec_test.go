@@ -130,6 +130,65 @@ func TestLoop(t *testing.T) {
 	}
 }
 
+// TestXadd is a regression test for a real crash: the *next* opcode a
+// dynamically-linked Alpine busybox/apk binary hit, right after
+// fixing the PREFETCHh gap above -- "unsupported two-byte opcode 0F
+// 0xc1" -- coming from ld-musl's own startup code (likely a lock-free
+// refcount/increment, XADD's classic use, gated behind a LOCK prefix
+// that's irrelevant to us -- see the case's comment in twobyte.go).
+// Covers both the 32-bit and 8-bit forms (0F C1 and 0F C0), and
+// checks both halves of XADD's swap-then-add semantics: the register
+// operand ends up with the destination's *original* value, and the
+// destination ends up with the sum.
+func TestXadd(t *testing.T) {
+	e := runUntilEnd(t, `
+		mov $100, %eax
+		mov $7, %ecx
+		xadd %ecx, %eax
+		mov $0x12, %dl
+		mov $0x03, %bl
+		xadd %bl, %dl
+	`)
+	if got, want := reg(t, e, RegRAX), uint64(107); got != want {
+		t.Fatalf("xadd dest (eax) = %d, want %d", got, want)
+	}
+	if got, want := reg(t, e, RegRCX), uint64(100); got != want {
+		t.Fatalf("xadd src (ecx) = %d, want %d (should hold dest's original value)", got, want)
+	}
+	if got, want := reg(t, e, RegRDX)&0xff, uint64(0x15); got != want {
+		t.Fatalf("xadd byte-form dest (dl) = %#x, want %#x", got, want)
+	}
+	if got, want := reg(t, e, RegRBX)&0xff, uint64(0x12); got != want {
+		t.Fatalf("xadd byte-form src (bl) = %#x, want %#x", got, want)
+	}
+}
+
+// TestBswap is a regression test for a real crash hit right after
+// fixing XADD above: a genuine Alpine apk-tools binary (whose SHA256
+// implementation uses BSWAP to convert the digest's endianness) hit
+// "unsupported two-byte opcode 0F 0xc8". Covers both the 32-bit form
+// (no REX.W) and the 64-bit form (REX.W), and both the plain and
+// REX.B-extended register-in-opcode encodings.
+func TestBswap(t *testing.T) {
+	e := runUntilEnd(t, `
+		mov $0x11223344, %eax
+		bswap %eax
+		movabs $0x1122334455667788, %rbx
+		bswap %rbx
+		mov $0xAABBCCDD, %r9d
+		bswap %r9d
+	`)
+	if got, want := reg(t, e, RegRAX), uint64(0x44332211); got != want {
+		t.Fatalf("bswap %%eax = %#x, want %#x", got, want)
+	}
+	if got, want := reg(t, e, RegRBX), uint64(0x8877665544332211); got != want {
+		t.Fatalf("bswap %%rbx = %#x, want %#x", got, want)
+	}
+	if got, want := reg(t, e, RegR9), uint64(0xDDCCBBAA); got != want {
+		t.Fatalf("bswap %%r9d (REX.B-extended) = %#x, want %#x", got, want)
+	}
+}
+
 func TestPushPopCallRet(t *testing.T) {
 	e := runUntilEnd(t, `
 		mov $10, %eax
@@ -239,6 +298,65 @@ func TestMovzxHighByteRegisterNoRex(t *testing.T) {
 	if got, want := reg(t, e, RegRCX), uint64(0x2A); got != want {
 		rsp := reg(t, e, RegRSP)
 		t.Fatalf("movzbl %%ah,%%ecx = %#x, want %#x (bug symptom: reads %%spl = rsp&0xff = %#x instead of %%ah)", got, want, rsp&0xff)
+	}
+}
+
+// TestPrefetchAndFenceHintsAreNops is a regression test for the
+// actual bug report: a real Alpine busybox/ash binary crashed with
+// "unsupported two-byte opcode 0F 0x18" the first time fork() +
+// dynamic-linking code ran far enough to execute a PREFETCHh
+// instruction (previously unreachable, since fork() always failed
+// with ENOSYS before this port implemented it -- see fork.go). This
+// covers that whole family (0F 0D, 0F 18-1D/1F, and LFENCE/MFENCE/
+// SFENCE in the 0F AE group): all pure cache/ordering hints with zero
+// architectural effect for this emulator. PREFETCHh in particular
+// must not fault even on a garbage address -- real hardware doesn't
+// either -- so this also exercises that against an address nowhere
+// near anything mapped.
+func TestPrefetchAndFenceHintsAreNops(t *testing.T) {
+	e := runUntilEnd(t, `
+		mov $0x600000, %rax
+		mov $0x2A, %ecx
+		prefetcht0 (%rax)
+		prefetcht1 (%rax)
+		prefetcht2 (%rax)
+		prefetchnta (%rax)
+		prefetchw (%rax)
+		lfence
+		mfence
+		sfence
+		mov $0x7fffffffffff, %rdx
+		prefetcht0 (%rdx)
+	`)
+	if got, want := reg(t, e, RegRCX), uint64(0x2A); got != want {
+		t.Fatalf("hint instructions clobbered ecx: got %#x, want %#x", got, want)
+	}
+}
+
+func TestMovntps(t *testing.T) {
+	code := assemble(t, `
+		mov $0x600000, %rax
+		movntps %xmm1, (%rax)
+	`)
+	e := newTestEngine(t, code)
+	if err := e.MemMap(0x600000, pageSize, ProtRead|ProtWrite); err != nil {
+		t.Fatal(err)
+	}
+	wantLo, wantHi := uint64(0x1122334455667788), uint64(0x99AABBCCDDEEFF00)
+	if err := e.RegWriteXMM(1, wantLo, wantHi); err != nil {
+		t.Fatal(err)
+	}
+	end := testCodeBase + uint64(len(code))
+	if err := e.EmuStart(testCodeBase, end); err != nil {
+		t.Fatalf("EmuStart: %v", err)
+	}
+	buf, err := e.MemRead(0x600000, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLo, gotHi := leToU64(buf[:8]), leToU64(buf[8:])
+	if gotLo != wantLo || gotHi != wantHi {
+		t.Fatalf("memory = %#x %#x, want %#x %#x", gotLo, gotHi, wantLo, wantHi)
 	}
 }
 

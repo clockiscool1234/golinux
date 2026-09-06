@@ -135,7 +135,17 @@ type MountRow struct {
 
 // normPath normalizes a guest absolute path: collapse . / .. / //
 // without touching the host filesystem at all (pure string algebra).
-func normPath(path string) string {
+// NormPath collapses a guest path into its canonical absolute form:
+// adds a leading "/" if missing, and resolves "." and ".." components
+// (".." past the root is simply dropped, same as a real kernel's path
+// walk clamping at "/"). It does NOT resolve symlinks -- that's a
+// separate concern (see the syscalls package's followSymlinks) that
+// needs VFS metadata lookups this package-level function has no
+// access to; this only does the pure string-level canonicalization
+// every path (symlink or not, final component or intermediate) needs
+// before it can be compared against anything by exact-string
+// matching, such as a mount table lookup.
+func NormPath(path string) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -155,6 +165,10 @@ func normPath(path string) string {
 	}
 	return "/" + strings.Join(parts, "/")
 }
+
+// normPath is the historical unexported name, kept as a thin alias so
+// every existing internal call site below reads the same as before.
+func normPath(path string) string { return NormPath(path) }
 
 // VFS is the virtual filesystem.
 type VFS struct {

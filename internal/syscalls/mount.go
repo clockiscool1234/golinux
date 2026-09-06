@@ -17,11 +17,26 @@ func init() {
 	register(consts.SYS_pivot_root, sysPivotRoot)
 }
 
+// resolveAbs turns a (possibly relative, possibly containing "."/".."
+// components) guest path into a canonical absolute one: joins it
+// against the calling process's cwd if it isn't already absolute,
+// then collapses "." and ".." the same way a real kernel's path walk
+// would. That collapsing matters even for an already-absolute input
+// like "/./proc" or a plain relative "proc" (cwd "/" makes those look
+// equivalent to "/proc" to the eye, but every consumer downstream --
+// especially procRel's exact-string mount-point-prefix comparison --
+// needs the literal canonical string, not just "starts with a
+// slash"). This must run regardless of whether the caller is about to
+// follow the final component's symlink (open/stat) or deliberately
+// not (lstat) -- collapsing dot-segments is a distinct concern from
+// symlink resolution, and skipping it for the lstat case is exactly
+// the bug that shipped once already (a real `ls ./proc` failing on
+// every child entry while `ls proc`/`ls /proc` worked).
 func resolveAbs(proc Proc, path string) string {
-	if strings.HasPrefix(path, "/") {
-		return path
+	if !strings.HasPrefix(path, "/") {
+		path = strings.TrimRight(proc.Cwd(), "/") + "/" + path
 	}
-	return strings.TrimRight(proc.Cwd(), "/") + "/" + path
+	return vfs.NormPath(path)
 }
 
 func sysMount(proc Proc, sourcePtr, targetPtr, fstypePtr, flags, _, _ uint64) (int64, error) {

@@ -28,6 +28,12 @@ func (e *Engine) decodeTwoByte(
 
 	// ── Existing general-purpose 0F opcodes ──────────────────────────────
 	switch {
+	case op2 == 0x0D: // PREFETCHW / PREFETCH (AMD 3DNow! prefetch hints): same story as 0x18 below -- pure hint, no fault even on a bad address.
+		if _, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB); err != nil {
+			return nil, err
+		}
+		return finish(func(e *Engine) (bool, error) { return false, nil })
+
 	case op2 == 0x05: // SYSCALL
 		return &decoded{len: c.pos, insnID: InsSyscall}, nil
 	case op2 == 0xA2: // CPUID
@@ -142,7 +148,19 @@ func (e *Engine) decodeTwoByte(
 			return false, e.imul2(reg, a, b, w)
 		})
 
-	case op2 == 0x1F: // multi-byte NOP
+	case op2 == 0x18: // PREFETCHh (group 16): pure cache hints, no
+		// architectural effect -- and, notably, real hardware doesn't
+		// fault even when the hinted address is unmapped/invalid, so
+		// this must only consume the ModRM/SIB/disp bytes (for
+		// correct instruction length) and never actually touch
+		// memory, unlike almost every other memory-operand case in
+		// this file.
+		if _, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB); err != nil {
+			return nil, err
+		}
+		return finish(func(e *Engine) (bool, error) { return false, nil })
+
+	case op2 == 0x19, op2 == 0x1A, op2 == 0x1B, op2 == 0x1C, op2 == 0x1D, op2 == 0x1F: // reserved/multi-byte NOP space
 		if _, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB); err != nil {
 			return nil, err
 		}
@@ -358,6 +376,67 @@ func (e *Engine) decodeTwoByte(
 			}
 			return false, e.writeOperand(accReg, w, dest)
 		})
+
+	case op2 == 0xC0, op2 == 0xC1: // XADD r/m, r -- "temp := dest + src;
+		// src := dest; dest := temp" (dest keeps the sum, src/reg
+		// gets dest's *original* value). Common in lock-free
+		// increment/decrement (e.g. musl's malloc arena refcounting,
+		// pthread internals) via a LOCK prefix -- irrelevant here
+		// since separate engines (forked processes) never share
+		// memory to begin with (see cpu.Engine.Clone), so there's
+		// nothing else that could interleave with this read-modify-
+		// write regardless of whether LOCK was present.
+		byteOp := op2 == 0xC0
+		w := width(byteOp)
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
+		if err != nil {
+			return nil, err
+		}
+		rm := applySeg(mr.rm)
+		reg := regOperand(mr.regField, rexPresent)
+		return finish(func(e *Engine) (bool, error) {
+			dest, err := e.readOperand(rm, w)
+			if err != nil {
+				return false, err
+			}
+			src, err := e.readOperand(reg, w)
+			if err != nil {
+				return false, err
+			}
+			sum := e.addWithFlags(dest, src, w)
+			if err := e.writeOperand(reg, w, dest); err != nil {
+				return false, err
+			}
+			return false, e.writeOperand(rm, w, sum)
+		})
+
+	case op2 >= 0xC8 && op2 <= 0xCF: // BSWAP r32/r64: register encoded
+		// in the opcode's low 3 bits (same "reg-in-opcode" pattern as
+		// MOV r,imm/PUSH r/POP r elsewhere in decode.go), extended by
+		// REX.B. 32-bit by default, 64-bit with REX.W -- there's no
+		// 16-bit form worth handling (undefined per Intel's manual,
+		// and never emitted by any real compiler). Found while
+		// running a real Alpine apk-tools binary -- its SHA256
+		// implementation uses BSWAP for the digest's endianness
+		// conversion.
+		regIdx := int(op2-0xC8) | boolBit(rexB)<<3
+		w := 4
+		if rexW {
+			w = 8
+		}
+		reg := regOperand(regIdx, rexPresent)
+		return finish(func(e *Engine) (bool, error) {
+			v, err := e.readOperand(reg, w)
+			if err != nil {
+				return false, err
+			}
+			var swapped uint64
+			for i := 0; i < w; i++ {
+				swapped |= ((v >> (8 * i)) & 0xff) << (8 * (w - 1 - i))
+			}
+			return false, e.writeOperand(reg, w, swapped)
+		})
+
 	case op2 == 0xBC: // BSF r, r/m
 		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
@@ -670,6 +749,21 @@ func (e *Engine) decodeSSE0F(
 		})
 
 	case 0x29: // MOVAPS xmm/m128,xmm  /  MOVAPD
+		src, dst, err := decodeMR2()
+		if err != nil {
+			return nil, err
+		}
+		return finish(func(e *Engine) (bool, error) {
+			return false, e.execXMM(dst, src, zu, func(_, _, slo, shi uint64) (uint64, uint64) { return slo, shi })
+		})
+
+	case 0x2B: // MOVNTPS/MOVNTPD xmm/m128,xmm: memory-destination-only
+		// non-temporal store -- identical to MOVAPS/MOVAPD's store form
+		// (0x29) except for a cache-placement hint that has no
+		// architectural effect here (nothing in this emulator models
+		// cache behavior). The only observable difference on real
+		// hardware from an ordinary store is timing/cache-eviction
+		// side effects, not the stored value.
 		src, dst, err := decodeMR2()
 		if err != nil {
 			return nil, err
@@ -1543,6 +1637,8 @@ func (e *Engine) decodeSSE0F(
 				if err := e.writeOperand(rm, 4, uint64(e.regs.mxcsr)); err != nil {
 					return false, err
 				}
+			case 5: // LFENCE (NOP here: engines never share memory -- see cpu.Engine.Clone's doc comment -- so there's no cross-engine ordering for a fence to enforce)
+			case 6: // MFENCE (NOP here, same reasoning)
 			case 7: // SFENCE (NOP here)
 			default:
 				return false, fmt.Errorf("cpu: 0F AE /%d not implemented", idx)

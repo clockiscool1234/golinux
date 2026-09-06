@@ -69,7 +69,7 @@ func sysMkdir(proc Proc, pathPtr, mode, _, _, _, _ uint64) (int64, error) {
 	if m == 0 {
 		m = 0o755
 	}
-	if err := proc.VFS().Mkdir(path, m); err != nil {
+	if err := proc.VFS().Mkdir(resolveAbs(proc, path), m); err != nil {
 		return int64(-vfsErrno(err)), nil
 	}
 	return 0, nil
@@ -99,7 +99,7 @@ func sysRmdir(proc Proc, pathPtr, _, _, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	if err := proc.VFS().Rmdir(path); err != nil {
+	if err := proc.VFS().Rmdir(resolveAbs(proc, path)); err != nil {
 		return int64(-vfsErrno(err)), nil
 	}
 	return 0, nil
@@ -110,7 +110,7 @@ func sysUnlink(proc Proc, pathPtr, _, _, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	if err := proc.VFS().Unlink(path); err != nil {
+	if err := proc.VFS().Unlink(resolveAbs(proc, path)); err != nil {
 		return int64(-vfsErrno(err)), nil
 	}
 	return 0, nil

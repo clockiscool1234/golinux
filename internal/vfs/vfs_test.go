@@ -50,6 +50,37 @@ func TestMigratesLegacyPylinuxSidecar(t *testing.T) {
 	}
 }
 
+// TestNormPath is a regression test for a real bug: relative-path
+// syscalls (stat, open, mkdir, etc. -- see internal/syscalls'
+// resolveAbs) used to only prepend cwd without collapsing "." and
+// ".." components, which happened to look right for ordinary files
+// (this package's own GetMeta/Stat call normPath internally regardless)
+// but broke specifically for mount points: procRel's exact-string
+// comparison against the mount table needs the fully canonical form,
+// not just "starts with a slash" -- found via a real `ls ./proc`
+// failing on every child entry while `ls proc`/`ls /proc` worked.
+func TestNormPath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/", "/"},
+		{"proc", "/proc"},
+		{"/proc", "/proc"},
+		{"./proc", "/proc"},
+		{"/./proc", "/proc"},
+		{"/proc/", "/proc"},
+		{"//proc", "/proc"},
+		{"/proc/cmdline", "/proc/cmdline"},
+		{"./proc/cmdline", "/proc/cmdline"},
+		{"/a/b/../c", "/a/c"},
+		{"/a/../../b", "/b"}, // ".." past root clamps at root, doesn't escape
+		{"a/./b/./c", "/a/b/c"},
+	}
+	for _, c := range cases {
+		if got := NormPath(c.in); got != c.want {
+			t.Errorf("NormPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestBasicOps(t *testing.T) {
 	dir := t.TempDir()
 	v, err := New(dir, false)

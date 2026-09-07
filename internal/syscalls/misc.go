@@ -1,10 +1,11 @@
 // misc.go: a grab-bag of smaller syscalls that don't earn their own
-// file yet. poll/select/ppoll/pselect6 are intentionally NOT here --
-// they need real multiplexed I/O over the fd table (host sockets,
-// pipes, and VFS files all mixed together) and deserve their own
-// pass; calling them ENOSYS is safer than a fake "nothing is ever
-// ready" or "everything is always ready" stub, either of which would
-// make callers spin or hang in confusing ways.
+// file yet. select/pselect6 are intentionally NOT here -- they need
+// the same host-fd-aware plumbing poll.go added for poll/ppoll, just
+// for a different wire format (fd_set bitmasks rather than a pollfd
+// array); left for a follow-up pass since nothing exercised so far
+// needs them. Calling them ENOSYS is safer than a fake "nothing is
+// ever ready" or "everything is always ready" stub, either of which
+// would make callers spin or hang in confusing ways.
 package syscalls
 
 import (

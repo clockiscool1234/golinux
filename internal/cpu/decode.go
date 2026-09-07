@@ -898,12 +898,27 @@ legacyPrefixes:
 			return false, nil
 		})
 
-	// -- NOP ------------------------------------------------------------
-	case op == 0x90:
+	// -- NOP (0x90, REX.B clear) -----------------------------------------
+	// A true no-op: no register access, no flags touched, nothing
+	// zero-extended. This must NOT be implemented as "XCHG RAX,RAX"
+	// (see the case below) -- even swapping a register with itself is
+	// not actually a no-op at the machine level when the operation
+	// runs at less than 64-bit width (the default here, absent
+	// REX.W): writing back a 32-bit result zero-extends and clears
+	// the register's upper 32 bits as a side effect, corrupting
+	// whatever real 64-bit value the register was holding. This was
+	// previously merged into the XCHG case below on the theory that
+	// self-swap is harmless, which is exactly the bug that mistake
+	// caused: a plain "90" NOP was clearing the top half of RAX.
+	case op == 0x90 && !rexB:
 		return finish(func(e *Engine) (bool, error) { return false, nil })
 
-	// -- XCHG rAX, r (short form 0x91-0x97) ----------------------------
-	case op >= 0x91 && op <= 0x97:
+	// -- XCHG rAX, r (short form 0x90-0x97 with REX.B, or 0x91-0x97) ----
+	// With REX.B set, the 3-bit register field embedded in the opcode
+	// is extended into r8-r15 -- e.g. 0x49 0x90 is XCHG R8,RAX, not a
+	// no-op -- so 0x90 only reaches this case when rexB is true (see
+	// the dedicated true-NOP case above for the plain-0x90 case).
+	case op >= 0x90 && op <= 0x97:
 		reg := int(op-0x90) | boolBit(rexB)<<3
 		w := width(false)
 		return finish(func(e *Engine) (bool, error) {

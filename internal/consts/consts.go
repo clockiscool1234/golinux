@@ -268,6 +268,16 @@ const (
 	TIOCSWINSZ = 0x5414
 )
 
+// --- poll(2)/ppoll(2) event/revent bits (linux/amd64 struct pollfd) -------
+const (
+	POLLIN   = 0x001
+	POLLPRI  = 0x002
+	POLLOUT  = 0x004
+	POLLERR  = 0x008
+	POLLHUP  = 0x010
+	POLLNVAL = 0x020
+)
+
 // Raw kernel struct termios (NCCS=19, no speed fields) is exactly 36
 // bytes on Linux/x86_64 -- see asm-generic/termbits.h.
 const TermiosSize = 36

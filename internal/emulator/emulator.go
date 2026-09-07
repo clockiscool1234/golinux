@@ -215,10 +215,16 @@ func (p *Process) DoBrk(addr uint64) uint64 {
 
 func (p *Process) DoMmap(addr, length uint64, prot, flags, fdNum int, offset uint64) (uint64, error) {
 	length = pageAlignUp(length)
+	// PROT_NONE (prot == 0, so protToEngine returns 0) is a real,
+	// deliberate request -- e.g. musl's malloc mmaps a PROT_NONE
+	// guard page (MAP_FIXED, right at the start of a freshly brk'd
+	// heap region) specifically so writes past its bookkeeping
+	// structures fault instead of silently corrupting adjacent
+	// memory. There is no such thing as an "unspecified" prot to
+	// fall back from here -- every caller passes an explicit value --
+	// so perms is used exactly as translated, with no ProtAll
+	// substitution.
 	perms := protToEngine(prot)
-	if perms == 0 {
-		perms = cpu.ProtAll
-	}
 	var base uint64
 	if flags&consts.MAP_FIXED != 0 && addr != 0 {
 		base = pageAlignDown(addr)
@@ -302,6 +308,42 @@ func (p *Process) mapSegments(img *elfload.Image, bias uint64) (uint64, error) {
 	return top, nil
 }
 
+// applyRelocations fixes up img's self-referencing pointers after
+// mapSegments has written its (still link-time-relative) segment data
+// into guest memory. Without this, any PIE/shared-object binary whose
+// data section holds a pointer to itself or to another symbol within
+// the same object (extremely common -- e.g. musl's combined
+// libc+dynamic-linker relies on this for its own internal startup
+// bookkeeping, not just for typical application code) ends up with
+// that pointer still holding its raw link-time placeholder value
+// instead of a real runtime address, and the first dereference of it
+// walks off into unmapped memory.
+//
+// Only R_X86_64_RELATIVE is applied (bias + addend, no symbol lookup
+// needed -- see that constant's doc comment in elfload for why this
+// covers the common case). Other relocation types (R_X86_64_GLOB_DAT,
+// R_X86_64_JUMP_SLOT, ...) need resolving a symbol against exported
+// definitions across every loaded object, which this emulator doesn't
+// do yet since so far nothing exercised has needed it; those entries
+// are silently skipped rather than failing the whole load.
+func (p *Process) applyRelocations(img *elfload.Image, bias uint64) error {
+	relas, err := elfload.Relocations(img)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 8)
+	for _, r := range relas {
+		if r.Type != elfload.R_X86_64_RELATIVE {
+			continue
+		}
+		binary.LittleEndian.PutUint64(buf, bias+uint64(r.Addend))
+		if err := p.engine.MemWrite(bias+r.Offset, buf); err != nil {
+			return fmt.Errorf("applying relocation at %#x: %w", bias+r.Offset, err)
+		}
+	}
+	return nil
+}
+
 func boolMask(b bool, v int) int {
 	if b {
 		return v
@@ -340,6 +382,9 @@ func (p *Process) Load(path string) error {
 	if err != nil {
 		return err
 	}
+	if err := p.applyRelocations(img, bias); err != nil {
+		return err
+	}
 	p.brkStart, p.brkCur, p.brkMappedEnd = top, top, top
 
 	entry := img.Entry + bias
@@ -359,6 +404,9 @@ func (p *Process) Load(path string) error {
 		}
 		atBase = interpBase
 		if _, err := p.mapSegments(interpImg, atBase); err != nil {
+			return err
+		}
+		if err := p.applyRelocations(interpImg, atBase); err != nil {
 			return err
 		}
 		entry = interpImg.Entry + atBase

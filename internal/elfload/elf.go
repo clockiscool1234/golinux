@@ -27,6 +27,25 @@ const (
 	PF_X = 1
 	PF_W = 2
 	PF_R = 4
+
+	// -- .dynamic tags (Elf64_Dyn.d_tag) needed to locate the
+	// relocation tables -- just enough to find DT_RELA/DT_JMPREL, not
+	// a general-purpose dynamic-section parser.
+	DT_NULL     = 0
+	DT_PLTRELSZ = 2
+	DT_PLTREL   = 20
+	DT_JMPREL   = 23
+	DT_RELA     = 7
+	DT_RELASZ   = 8
+	DT_RELAENT  = 9
+
+	// R_X86_64_RELATIVE is the one relocation type that needs no
+	// symbol resolution at all -- just "load base + addend" -- which
+	// makes it both the simplest to implement and, in practice, the
+	// overwhelming majority of what a single self-contained shared
+	// object (like musl's combined libc+dynamic-linker) actually
+	// needs to fix up its own internal self-pointers at load time.
+	R_X86_64_RELATIVE = 8
 )
 
 // ELFError is a parse failure, mirroring Python's ELFError.
@@ -177,6 +196,153 @@ func LoadSegments(img *Image) ([]Segment, error) {
 		segData := make([]byte, ph.Memsz)
 		copy(segData, img.Data[ph.Offset:end])
 		out = append(out, Segment{Vaddr: ph.Vaddr, Memsz: ph.Memsz, Data: segData, Flags: ph.Flags})
+	}
+	return out, nil
+}
+
+// Rela is one parsed Elf64_Rela entry: the fields needed to apply
+// R_X86_64_RELATIVE (Type is checked by the caller; Sym is kept for
+// future symbol-based relocation types but unused for RELATIVE).
+type Rela struct {
+	Offset uint64
+	Type   uint32
+	Sym    uint32
+	Addend int64
+}
+
+// vaddrToFileOffset finds the PT_LOAD segment covering vaddr and
+// returns the corresponding offset into img.Data. Relocation tables
+// are always themselves part of some PT_LOAD segment (the dynamic
+// linker has to be able to read them without any special-case
+// mapping), so this is enough to locate them without needing a
+// separate "read raw bytes at this vaddr" path.
+func vaddrToFileOffset(img *Image, vaddr uint64) (uint64, bool) {
+	for _, ph := range img.Segments {
+		if ph.Type != PT_LOAD {
+			continue
+		}
+		if vaddr >= ph.Vaddr && vaddr < ph.Vaddr+ph.Filesz {
+			return ph.Offset + (vaddr - ph.Vaddr), true
+		}
+	}
+	return 0, false
+}
+
+// dynEntry is one raw Elf64_Dyn tag/value pair.
+type dynEntry struct {
+	Tag int64
+	Val uint64
+}
+
+// parseDynamic reads the PT_DYNAMIC segment's tag/value array. Returns
+// nil (not an error) if img has no PT_DYNAMIC segment -- static
+// binaries and, in principle, some contrived shared objects legitimately
+// have none.
+func parseDynamic(img *Image) ([]dynEntry, error) {
+	var dyn *ProgramHeader
+	for i := range img.Segments {
+		if img.Segments[i].Type == PT_DYNAMIC {
+			dyn = &img.Segments[i]
+			break
+		}
+	}
+	if dyn == nil {
+		return nil, nil
+	}
+	const dynEntSize = 16 // sizeof Elf64_Dyn: int64 d_tag + uint64 d_val/d_ptr
+	end := dyn.Offset + dyn.Filesz
+	if end > uint64(len(img.Data)) {
+		return nil, &ELFError{Msg: img.Path + ": PT_DYNAMIC out of range"}
+	}
+	var out []dynEntry
+	for off := dyn.Offset; off+dynEntSize <= end; off += dynEntSize {
+		tag := int64(binary.LittleEndian.Uint64(img.Data[off : off+8]))
+		val := binary.LittleEndian.Uint64(img.Data[off+8 : off+16])
+		if tag == DT_NULL {
+			break
+		}
+		out = append(out, dynEntry{Tag: tag, Val: val})
+	}
+	return out, nil
+}
+
+// readRelaTable parses a single Elf64_Rela array (used for both
+// DT_RELA/.rela.dyn and DT_JMPREL/.rela.plt, which share the same
+// entry layout) located at vaddr, sizeBytes long.
+func readRelaTable(img *Image, vaddr, sizeBytes uint64) ([]Rela, error) {
+	if sizeBytes == 0 {
+		return nil, nil
+	}
+	fileOff, ok := vaddrToFileOffset(img, vaddr)
+	if !ok {
+		return nil, &ELFError{Msg: img.Path + ": relocation table vaddr not backed by any PT_LOAD segment"}
+	}
+	const relaEntSize = 24 // sizeof Elf64_Rela: r_offset, r_info (both u64), r_addend (s64)
+	end := fileOff + sizeBytes
+	if end > uint64(len(img.Data)) {
+		return nil, &ELFError{Msg: img.Path + ": relocation table out of range"}
+	}
+	var out []Rela
+	for off := fileOff; off+relaEntSize <= end; off += relaEntSize {
+		rOffset := binary.LittleEndian.Uint64(img.Data[off : off+8])
+		rInfo := binary.LittleEndian.Uint64(img.Data[off+8 : off+16])
+		rAddend := int64(binary.LittleEndian.Uint64(img.Data[off+16 : off+24]))
+		out = append(out, Rela{
+			Offset: rOffset,
+			Type:   uint32(rInfo),
+			Sym:    uint32(rInfo >> 32),
+			Addend: rAddend,
+		})
+	}
+	return out, nil
+}
+
+// Relocations returns every relocation entry from both .rela.dyn
+// (DT_RELA) and .rela.plt (DT_JMPREL, only when DT_PLTREL says it's
+// RELA-format, which is what x86_64 always uses) in img's PT_DYNAMIC
+// segment. Callers apply whichever entry types they support (today,
+// just R_X86_64_RELATIVE -- see the constant's doc comment) and are
+// expected to silently skip the rest rather than fail the whole load,
+// since symbol-based types need cross-object symbol resolution this
+// package doesn't do yet.
+func Relocations(img *Image) ([]Rela, error) {
+	entries, err := parseDynamic(img)
+	if err != nil || entries == nil {
+		return nil, err
+	}
+
+	var relaVaddr, relaSize uint64
+	var jmprelVaddr, pltrelsz uint64
+	var pltrelIsRela bool
+	for _, e := range entries {
+		switch e.Tag {
+		case DT_RELA:
+			relaVaddr = e.Val
+		case DT_RELASZ:
+			relaSize = e.Val
+		case DT_JMPREL:
+			jmprelVaddr = e.Val
+		case DT_PLTRELSZ:
+			pltrelsz = e.Val
+		case DT_PLTREL:
+			pltrelIsRela = e.Val == DT_RELA
+		}
+	}
+
+	var out []Rela
+	if relaVaddr != 0 && relaSize != 0 {
+		rs, err := readRelaTable(img, relaVaddr, relaSize)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rs...)
+	}
+	if jmprelVaddr != 0 && pltrelsz != 0 && pltrelIsRela {
+		rs, err := readRelaTable(img, jmprelVaddr, pltrelsz)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rs...)
 	}
 	return out, nil
 }

@@ -26,9 +26,10 @@
 //	arch.go     arch_prctl/set_tid_address/set_robust_list/rseq
 //	signal.go   rt_sigaction/rt_sigprocmask/kill/tgkill (stubs for now)
 //	mount.go    mount/umount2/chroot/sethostname
-//	misc.go     getrlimit/statfs/sync/flock/ftruncate/poll (stubs)
+//	misc.go     getrlimit/statfs/sync/flock/ftruncate/... (stubs)
 //	fork.go     execve (real); fork/vfork/clone/wait4 (ENOSYS, see file)
 //	exit.go     exit/exit_group
+//	poll.go     poll/ppoll (real, host-fd-backed; select/pselect6 still stubbed)
 //
 // This pass covers real filesystem access, process/identity
 // introspection, in-place execve(), and synthetic /proc and /dev
@@ -39,8 +40,10 @@
 //     fork.go) -- needs a different design than a direct port.
 //   - Real signal delivery: needs the sigtramp/context-switch
 //     machinery from sysemu/emulator.py, not yet ported.
-//   - poll/select/ppoll/pselect6: need real multiplexed I/O over the
-//     fd table; stubbed conservatively for now (see misc.go).
+//   - select/pselect6: same reasoning poll/ppoll used to fall under --
+//     need real multiplexed I/O over the fd table for their fd_set
+//     wire format; stubbed conservatively for now (see misc.go).
+//     poll/ppoll themselves are implemented (see poll.go).
 //   - sockets (socket/connect/bind/...): a whole subsystem on its
 //     own; not started yet.
 package syscalls

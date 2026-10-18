@@ -20,6 +20,7 @@ func (e *Engine) decodeTwoByte(
 	applySeg func(operand) operand,
 	width func(byteOp bool) int,
 	finish func(func(*Engine) (bool, error)) (*decoded, error),
+	finishBranch func(func(*Engine) (bool, error)) (*decoded, error),
 ) (*decoded, error) {
 	op2, err := c.u8()
 	if err != nil {
@@ -45,7 +46,7 @@ func (e *Engine) decodeTwoByte(
 		if err != nil {
 			return nil, err
 		}
-		return finish(func(e *Engine) (bool, error) {
+		return finishBranch(func(e *Engine) (bool, error) {
 			if e.evalCC(cc) {
 				e.regs.rip = e.curInstrEnd + uint64(int64(rel))
 				return true, nil
@@ -367,7 +368,7 @@ func (e *Engine) decodeTwoByte(
 			}
 			// Compare DEST and ACC
 			e.subWithFlags(dest, acc, w)
-			
+
 			// Equality check must be based on truncated values.
 			// e.readOperand masks already, but let's be safe.
 			dest &= maskWidth(w)
@@ -581,9 +582,9 @@ func (e *Engine) decodeSSE0F(
 		return d, s, e2
 	}
 
-	isSS := rep == repZ   // F3 0F: scalar single
-	isSD := rep == repNZ  // F2 0F: scalar double
-	isPD := opSize16      // 66 0F: packed double / SSE2 int
+	isSS := rep == repZ  // F3 0F: scalar single
+	isSD := rep == repNZ // F2 0F: scalar double
+	isPD := opSize16     // 66 0F: packed double / SSE2 int
 
 	// SSE2 integer ops require 66 prefix.
 	sseInt := isPD
@@ -2773,8 +2774,8 @@ func (e *Engine) decodeVexInsn(
 	// The vvvv field is the 3rd register operand (for 3-operand forms).
 	// It's already un-inverted in vexState.
 	vvvv := vex.vvvv
-	L := vex.L       // true = 256-bit (YMM)
-	zu := true       // VEX writes always apply zero-upper rule for register targets
+	L := vex.L // true = 256-bit (YMM)
+	zu := true // VEX writes always apply zero-upper rule for register targets
 
 	decodeMR2 := func() (dst, src operand, err error) {
 		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
@@ -2794,7 +2795,7 @@ func (e *Engine) decodeVexInsn(
 		return mr.regField, vvvv, rm, nil
 	}
 
-	isPD := vex.opSize16()  // 66 → packed double / SSE2 int
+	isPD := vex.opSize16() // 66 → packed double / SSE2 int
 	isSS := vex.repZ()     // F3 → scalar single
 	isSD := vex.repNZ()    // F2 → scalar double
 

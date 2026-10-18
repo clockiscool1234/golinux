@@ -13,6 +13,11 @@
 // `*uc.Engine` and its `cpu.RegRAX`-style constant references back to
 // `uc.RegRAX`.
 //
+// Engine.SetBlockJIT enables an experimental cached basic-block
+// interpreter. It runs the same decoded instruction handlers in groups,
+// splitting blocks at control flow and hooks; code changes invalidate
+// the cache. It does not emit native host machine code.
+//
 // Scope of this first pass: general-purpose integer execution only.
 //
 //	Implemented:
@@ -190,6 +195,11 @@ type Engine struct {
 	decodeCache          map[uint64]*decodedPage
 	cachedDecodePageAddr uint64
 	cachedDecodePage     *decodedPage
+	blockJIT             bool
+	blockCache           [blockCacheSize]*basicBlock
+	blockCacheGeneration uint64
+	cachedBlockStart     uint64
+	cachedBlock          *basicBlock
 
 	// curInstrEnd is the address just past the instruction currently
 	// executing -- set by the fetch/decode/execute loop right before
@@ -238,6 +248,7 @@ func (e *Engine) Clone() *Engine {
 		// doesn't invalidate the other's cache. Starting empty is the
 		// cheap correct answer.
 		decodeCache: make(map[uint64]*decodedPage),
+		blockJIT:    e.blockJIT,
 	}
 }
 
@@ -433,8 +444,26 @@ func (e *Engine) EmuStart(begin, until uint64) error {
 		// in the write path itself because the write path only has the
 		// Memory, not the owning Engine.
 		if e.mem.consumeCodeDirty() {
-			e.decodeCache = make(map[uint64]*decodedPage)
-			e.cachedDecodePage = nil
+			e.invalidateCodeCaches()
+		}
+		if e.blockJIT {
+			block, err := e.compileBlock(pc)
+			if err != nil {
+				if !e.handleFault(err) {
+					e.printTrace()
+					return err
+				}
+				continue
+			}
+			if block != nil {
+				if err := e.executeBlock(block, until); err != nil {
+					if !e.handleFault(err) {
+						e.printTrace()
+						return err
+					}
+				}
+				continue
+			}
 		}
 
 		pageAddr := pc &^ uint64(pageMask)

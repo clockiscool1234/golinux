@@ -16,9 +16,10 @@ type decodedPage struct {
 // handled specially by the run loop via HookInsn -- see cpu.go) and
 // -1 for everything else.
 type decoded struct {
-	len    int
-	insnID int
-	exec   func(e *Engine) (branched bool, err error)
+	len       int
+	insnID    int
+	endsBlock bool
+	exec      func(e *Engine) (branched bool, err error)
 }
 
 // repKind identifies which (if any) REP-family legacy prefix preceded
@@ -289,6 +290,10 @@ legacyPrefixes:
 		d.len = c.pos
 		d.exec = exec
 		return d, nil
+	}
+	finishBranch := func(exec func(e *Engine) (bool, error)) (*decoded, error) {
+		d.endsBlock = true
+		return finish(exec)
 	}
 
 	switch {
@@ -716,7 +721,7 @@ legacyPrefixes:
 
 	// -- MOVZX/MOVSX/MOVSXD -----------------------------------------
 	case op == 0x0F:
-		return e.decodeTwoByte(c, rexPresent, rexW, rexR, rexX, rexB, opSize16, rep, applySeg, width, finish)
+		return e.decodeTwoByte(c, rexPresent, rexW, rexR, rexX, rexB, opSize16, rep, applySeg, width, finish, finishBranch)
 	case op == 0x63: // MOVSXD r64, r/m32
 		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
 		if err != nil {
@@ -837,7 +842,7 @@ legacyPrefixes:
 				return false, e.writeOperand(rm, w, e.decFlags(a, w))
 			})
 		case 2: // CALL r/m64 (near, indirect)
-			return finish(func(e *Engine) (bool, error) {
+			return finishBranch(func(e *Engine) (bool, error) {
 				target, err := e.readOperand(rm, 8)
 				if err != nil {
 					return false, err
@@ -849,7 +854,7 @@ legacyPrefixes:
 				return true, nil
 			})
 		case 4: // JMP r/m64 (near, indirect)
-			return finish(func(e *Engine) (bool, error) {
+			return finishBranch(func(e *Engine) (bool, error) {
 				target, err := e.readOperand(rm, 8)
 				if err != nil {
 					return false, err
@@ -909,7 +914,7 @@ legacyPrefixes:
 		if err != nil {
 			return nil, err
 		}
-		return finish(func(e *Engine) (bool, error) {
+		return finishBranch(func(e *Engine) (bool, error) {
 			target := e.curInstrEnd + uint64(int64(rel))
 			if err := e.push64(e.curInstrEnd); err != nil {
 				return false, err
@@ -922,7 +927,7 @@ legacyPrefixes:
 		if err != nil {
 			return nil, err
 		}
-		return finish(func(e *Engine) (bool, error) {
+		return finishBranch(func(e *Engine) (bool, error) {
 			e.regs.rip = e.curInstrEnd + uint64(int64(rel))
 			return true, nil
 		})
@@ -931,7 +936,7 @@ legacyPrefixes:
 		if err != nil {
 			return nil, err
 		}
-		return finish(func(e *Engine) (bool, error) {
+		return finishBranch(func(e *Engine) (bool, error) {
 			e.regs.rip = e.curInstrEnd + uint64(int64(rel))
 			return true, nil
 		})
@@ -941,7 +946,7 @@ legacyPrefixes:
 		if err != nil {
 			return nil, err
 		}
-		return finish(func(e *Engine) (bool, error) {
+		return finishBranch(func(e *Engine) (bool, error) {
 			if e.evalCC(cc) {
 				e.regs.rip = e.curInstrEnd + uint64(int64(rel))
 				return true, nil
@@ -949,7 +954,7 @@ legacyPrefixes:
 			return false, nil
 		})
 	case op == 0xC3: // RET
-		return finish(func(e *Engine) (bool, error) {
+		return finishBranch(func(e *Engine) (bool, error) {
 			target, err := e.pop64()
 			if err != nil {
 				return false, err
@@ -962,7 +967,7 @@ legacyPrefixes:
 		if err != nil {
 			return nil, err
 		}
-		return finish(func(e *Engine) (bool, error) {
+		return finishBranch(func(e *Engine) (bool, error) {
 			target, err := e.pop64()
 			if err != nil {
 				return false, err

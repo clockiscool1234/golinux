@@ -261,6 +261,7 @@ double-dash descriptive form — use whichever you like:
 |-------|----------------------|---------------------------------------------------|
 | `-r`  | `--vfs-root`         | host directory backing the guest `/`               |
 | `-v`  | `--verbose`          | log every syscall to stderr                        |
+| `-j`  | `--jit`              | experimental cached basic-block interpreter (default remains the fallback interpreter) |
 | `-n`  | `--no-automount`     | skip the default proc/sysfs/devtmpfs mount         |
 | `-X`  | `--extract-tarball`  | extract a tarball into the vfs root before running |
 | `-e`  | `--env`              | extra env var `KEY=VAL` (repeatable)               |
@@ -274,6 +275,9 @@ double-dash descriptive form — use whichever you like:
 # Log every syscall to stderr:
 ./golinux -r ./vfsroot -v /bin/hello
 
+# Try the experimental basic-block compiler:
+./golinux --jit -r ./vfsroot /bin/hello
+
 # Skip the default proc/sysfs/devtmpfs auto-mount:
 ./golinux --vfs-root ./vfsroot --no-automount /bin/hello
 
@@ -285,6 +289,11 @@ double-dash descriptive form — use whichever you like:
 modified by the guest persist in that directory (with its
 `.golinux_meta` sidecar files) between invocations, just like a real
 disk would.
+
+The experimental `--jit` mode caches groups of decoded instructions
+as basic blocks; it does not emit native machine code. The existing
+interpreter remains the default and fallback. The Alpine `apk add nano`
+test passed, but the JIT was slower in that initial benchmark.
 
 Run `./golinux -h` for the full flag list.
 

@@ -80,6 +80,7 @@ type flagHelp struct {
 var flagHelps = []flagHelp{
 	{"r", "vfs-root", "path", "host directory backing the guest '/'"},
 	{"v", "verbose", "", "log every syscall to stderr"},
+	{"j", "jit", "", "experimental basic-block compiler (falls back to the interpreter)"},
 	{"n", "no-automount", "", "skip the default proc/sysfs/devtmpfs mount at startup; the guest can still mount(2) them itself"},
 	{"X", "extract-tarball", "path", "extract a tarball (.tar, .tar.gz/.tgz, or .tar.xz) into the vfs root before running"},
 	{"e", "env", "KEY=VAL", "extra environment variable for the guest. Repeatable."},
@@ -113,9 +114,11 @@ func run() int {
 		hostFiles  stringList
 		envVars    stringList
 		cpuProfile string
+		blockJIT   bool
 	)
 	stringFlag(&vfsRoot, "r", "vfs-root", "./vfsroot", "host directory backing the guest '/'")
 	boolFlag(&verbose, "v", "verbose", false, "log every syscall to stderr")
+	boolFlag(&blockJIT, "j", "jit", false, "experimental basic-block compiler (falls back to the interpreter)")
 	stringFlag(&cwd, "w", "cwd", "/", "initial guest working directory")
 	boolFlag(&noAutoMnt, "n", "no-automount", false, "skip the default mount -t proc/sysfs/devtmpfs done at startup; the guest can still mount(2) them itself")
 	stringFlag(&extractTar, "X", "extract-tarball", "", "extract a tarball into the vfs root before running, e.g. ./rootfs.tar.gz")
@@ -236,6 +239,7 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "golinux: creating process: %v\n", err)
 		return 1
 	}
+	proc.SetBlockJIT(blockJIT)
 
 	// Resolve any VFS-level symlinks on the initial program path before
 	// mapping it to a host path (e.g. /bin/sh -> /bin/busybox).

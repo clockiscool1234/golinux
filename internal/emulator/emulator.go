@@ -81,6 +81,7 @@ type Process struct {
 	Pid_        int
 	PpidVal     int // 0 for the root process (no guest parent); set by doFork for children
 	VerboseFlag bool
+	blockJIT    bool
 	LogFn       func(string)
 	HostnameVal string
 	BootTimeVal int64
@@ -133,6 +134,11 @@ func NewProcess(vv *vfs.VFS, argv, envp []string, cwd string, verbose bool) (*Pr
 }
 
 // -- syscalls.Proc interface implementation --------------------------------
+
+func (p *Process) SetBlockJIT(enabled bool) {
+	p.blockJIT = enabled
+	p.engine.SetBlockJIT(enabled)
+}
 
 func (p *Process) MemRead(addr uint64, size int) ([]byte, error) { return p.engine.MemRead(addr, size) }
 func (p *Process) MemWrite(addr uint64, data []byte) error       { return p.engine.MemWrite(addr, data) }
@@ -678,6 +684,7 @@ func (p *Process) execImage(hostPath string, argv, envp []string) error {
 		return err
 	}
 	p.engine = newEngine
+	p.engine.SetBlockJIT(p.blockJIT)
 	p.mmapNext = mmapBase
 	p.brkStart, p.brkCur, p.brkMappedEnd = 0, 0, 0
 	p.fsbase = 0
@@ -764,6 +771,7 @@ func (p *Process) doFork(vfork bool, resumeRIP uint64) int {
 		Pid_:        allocChildPid(),
 		PpidVal:     p.Pid_,
 		VerboseFlag: p.VerboseFlag,
+		blockJIT:    p.blockJIT,
 		LogFn:       p.LogFn,
 		HostnameVal: p.HostnameVal,
 		BootTimeVal: p.BootTimeVal,

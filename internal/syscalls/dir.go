@@ -21,6 +21,7 @@ func init() {
 	register(consts.SYS_rename, sysRename)
 	register(consts.SYS_renameat, sysRenameat)
 	register(consts.SYS_symlink, sysSymlink)
+	register(consts.SYS_symlinkat, sysSymlinkat)
 	register(consts.SYS_link, sysLink)
 	register(consts.SYS_linkat, sysLinkat)
 	register(consts.SYS_getdents64, sysGetdents64)
@@ -209,6 +210,25 @@ func sysSymlink(proc Proc, targetPtr, linkpathPtr, _, _, _, _ uint64) (int64, er
 	full := linkpath
 	if !strings.HasPrefix(linkpath, "/") {
 		full = strings.TrimRight(proc.Cwd(), "/") + "/" + linkpath
+	}
+	if proc.VFS().Exists(full) {
+		return int64(-errno.EEXIST), nil
+	}
+	if err := proc.VFS().Symlink(target, full); err != nil {
+		return int64(-vfsErrno(err)), nil
+	}
+	return 0, nil
+}
+
+func sysSymlinkat(proc Proc, targetPtr, dirfd, linkpathPtr, _, _, _ uint64) (int64, error) {
+	target, targetOK := cstr(proc, targetPtr, 4096)
+	linkpath, linkpathOK := cstr(proc, linkpathPtr, 4096)
+	if !targetOK || !linkpathOK {
+		return int64(-errno.EFAULT), nil
+	}
+	full, errn := resolve(proc, int32(dirfd), linkpath)
+	if errn != 0 {
+		return int64(-errn), nil
 	}
 	if proc.VFS().Exists(full) {
 		return int64(-errno.EEXIST), nil

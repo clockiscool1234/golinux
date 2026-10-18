@@ -52,7 +52,7 @@
 //	    movement, packed integer/float arithmetic, and conversions.
 //
 //	Not implemented yet (each is a real, separable follow-up):
-//	  - x87 floating point, MMX.
+//	  - Most x87 arithmetic and MMX; a small x87 subset covers musl long-double formatting.
 //	  - Far jumps/calls, IN/OUT, and the rest of the 0F-prefixed
 //	    instruction space beyond what's listed above.
 //	  - Address-size override (0x67) -- 64-bit addressing only.
@@ -205,6 +205,7 @@ type Engine struct {
 // registers zeroed.
 func NewEngine() (*Engine, error) {
 	return &Engine{
+		regs:        Registers{x87Control: 0x037f},
 		mem:         newMemory(),
 		insnHooks:   make(map[int]insnHook),
 		decodeCache: make(map[uint64]*decodedPage),

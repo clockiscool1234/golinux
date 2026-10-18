@@ -131,10 +131,12 @@ const (
 	SYS_utimes            = 235
 	SYS_openat            = 257
 	SYS_mkdirat           = 258
+	SYS_fchownat          = 260
 	SYS_fstatat           = 262
 	SYS_unlinkat          = 263
 	SYS_renameat          = 264
 	SYS_linkat            = 265
+	SYS_symlinkat         = 266
 	SYS_readlinkat        = 267
 	SYS_faccessat         = 269
 	SYS_pselect6          = 270
@@ -167,7 +169,7 @@ var SyscallNames = map[int]string{
 	SYS_getcwd: "getcwd", SYS_chdir: "chdir", SYS_rename: "rename", SYS_mkdir: "mkdir",
 	SYS_rmdir: "rmdir", SYS_creat: "creat", SYS_link: "link", SYS_unlink: "unlink",
 	SYS_symlink: "symlink", SYS_readlink: "readlink", SYS_chmod: "chmod",
-	SYS_fchown: "fchown", SYS_lchown: "lchown", SYS_chown: "chown", SYS_umask: "umask",
+	SYS_fchown: "fchown", SYS_lchown: "lchown", SYS_chown: "chown", SYS_fchownat: "fchownat", SYS_umask: "umask",
 	SYS_gettimeofday: "gettimeofday", SYS_getrlimit: "getrlimit", SYS_getuid: "getuid",
 	SYS_getgid: "getgid", SYS_setuid: "setuid", SYS_setgid: "setgid", SYS_geteuid: "geteuid",
 	SYS_getegid: "getegid", SYS_setpgid: "setpgid", SYS_getppid: "getppid",
@@ -184,7 +186,7 @@ var SyscallNames = map[int]string{
 	SYS_clock_gettime: "clock_gettime", SYS_clock_getres: "clock_getres",
 	SYS_exit_group: "exit_group", SYS_tgkill: "tgkill", SYS_utimes: "utimes",
 	SYS_openat: "openat", SYS_mkdirat: "mkdirat", SYS_fstatat: "fstatat",
-	SYS_unlinkat: "unlinkat", SYS_renameat: "renameat", SYS_linkat: "linkat",
+	SYS_unlinkat: "unlinkat", SYS_renameat: "renameat", SYS_linkat: "linkat", SYS_symlinkat: "symlinkat",
 	SYS_readlinkat: "readlinkat", SYS_faccessat: "faccessat", SYS_pselect6: "pselect6",
 	SYS_ppoll: "ppoll", SYS_set_robust_list: "set_robust_list", SYS_utimensat: "utimensat",
 	SYS_prlimit64: "prlimit64", SYS_getrandom: "getrandom", SYS_rseq: "rseq",
@@ -252,10 +254,10 @@ const (
 	AF_INET   = 2
 	AF_INET6  = 10
 
-	SOCK_STREAM = 1
-	SOCK_DGRAM  = 2
-	SOCK_RAW    = 3
-	SOCK_NONBLOCK_C = 0o4000  // socket() type-flag spelling of O_NONBLOCK
+	SOCK_STREAM     = 1
+	SOCK_DGRAM      = 2
+	SOCK_RAW        = 3
+	SOCK_NONBLOCK_C = 0o4000    // socket() type-flag spelling of O_NONBLOCK
 	SOCK_CLOEXEC_C  = 0o2000000 // socket() type-flag spelling of O_CLOEXEC
 )
 

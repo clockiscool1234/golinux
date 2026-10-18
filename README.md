@@ -30,7 +30,7 @@ user-mode emulation or `ptrace`-based sandboxes than to Docker.
         │        every SYSCALL instruction traps here │  engine)  │
         ▼                                             └───────────┘
  ┌─────────────┐
- │  syscalls   │  ~115 syscall handlers, dispatched by number
+ │  syscalls   │  138 syscall handlers, dispatched by number
  └──────┬──────┘
         │
    ┌────┼─────────────┬─────────────┬─────────────┐
@@ -144,7 +144,7 @@ handled as in-memory pseudo-devices.
 
 ### What's implemented
 
-136 syscall numbers currently have handlers across file I/O, filesystem
+138 syscall numbers currently have handlers across file I/O, filesystem
 metadata, directory operations, memory management (`brk`/`mmap`/`mprotect`),
 multi-process support (`fork`/`vfork`/`clone`/`wait4`, see above),
 process/identity introspection, time, terminal control, multiplexed I/O,
@@ -400,7 +400,7 @@ instructions** (including XMM/YMM registers, VEX prefixes, data
 movement — including `MOVNTPS`/`MOVNTPD` non-temporal stores — packed
 integer/float arithmetic, and conversions). See the package doc
 comment at the top of `internal/cpu/cpu.go` for exactly what's covered
-and what isn't yet (no x87, no MMX, no far jumps/IN/OUT). It's
+and what isn't yet (a limited x87 subset used by musl's long-double formatter, not general x87 arithmetic; no MMX, far jumps, IN, or OUT). It's
 exercised by an extensive test suite in `internal/cpu/*_test.go` that
 assemble real x86-64 via the host `as`/`objcopy` toolchain rather than
 hand-encoded byte literals, so the test fixtures themselves are

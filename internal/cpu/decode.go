@@ -292,6 +292,129 @@ legacyPrefixes:
 	}
 
 	switch {
+
+	case op == 0xD8 || op == 0xD9 || op == 0xDB || op == 0xDD || op == 0xDE || op == 0xDF:
+		mr, err := decodeModRM(e, c, rexPresent, rexR, rexX, rexB)
+		if err != nil {
+			return nil, err
+		}
+		reg, index := mr.regField&7, mr.rm.reg&7
+		if mr.rm.kind != opndMem {
+			switch {
+			case op == 0xD8 && reg == 0:
+				return finish(func(e *Engine) (bool, error) {
+					e.x87Add(index)
+					return false, nil
+				})
+			case op == 0xD9 && reg == 0:
+				return finish(func(e *Engine) (bool, error) {
+					e.x87Push(e.regs.x87[(e.regs.x87Top+uint8(index))&7])
+					return false, nil
+				})
+			case op == 0xD9 && reg == 1:
+				return finish(func(e *Engine) (bool, error) {
+					a, b := e.regs.x87Top, (e.regs.x87Top+uint8(index))&7
+					e.regs.x87[a], e.regs.x87[b] = e.regs.x87[b], e.regs.x87[a]
+					return false, nil
+				})
+			case op == 0xD9 && reg == 5 && index == 6:
+				return finish(func(e *Engine) (bool, error) {
+					e.x87Push(ext80{})
+					return false, nil
+				})
+			case op == 0xDB && reg == 5:
+				return finish(func(e *Engine) (bool, error) {
+					e.x87Compare(index, false)
+					return false, nil
+				})
+			case op == 0xDE && reg == 5:
+				return finish(func(e *Engine) (bool, error) {
+					e.x87SubPop(index)
+					return false, nil
+				})
+			case op == 0xDD && reg == 3:
+				return finish(func(e *Engine) (bool, error) {
+					e.x87StoreRegister(index, true)
+					return false, nil
+				})
+			case op == 0xDF && reg == 5:
+				return finish(func(e *Engine) (bool, error) {
+					e.x87Compare(index, true)
+					return false, nil
+				})
+			default:
+				return nil, fmt.Errorf("cpu: unsupported x87 register opcode %#02x /%d", op, reg)
+			}
+		}
+		rm := applySeg(mr.rm)
+		if op == 0xD8 {
+			if reg != 1 {
+				return nil, fmt.Errorf("cpu: unsupported x87 memory opcode %#02x /%d", op, reg)
+			}
+			return finish(func(e *Engine) (bool, error) {
+				return false, e.x87Multiply32(rm)
+			})
+		}
+		if op == 0xD9 && reg == 5 {
+			return finish(func(e *Engine) (bool, error) { return false, e.x87LoadControl(rm) })
+		}
+		if op == 0xD9 && reg == 7 {
+			return finish(func(e *Engine) (bool, error) { return false, e.x87StoreControl(rm) })
+		}
+		if op == 0xDE {
+			return nil, fmt.Errorf("cpu: unsupported x87 memory opcode %#02x /%d", op, reg)
+		}
+		if op == 0xDF {
+			switch reg {
+			case 5:
+				return finish(func(e *Engine) (bool, error) {
+					return false, e.x87LoadInteger(rm, 8)
+				})
+			case 7:
+				return finish(func(e *Engine) (bool, error) {
+					return false, e.x87StoreInteger(rm, 8, true)
+				})
+			default:
+				return nil, fmt.Errorf("cpu: unsupported x87 memory opcode %#02x /%d", op, reg)
+			}
+		}
+		load, pop, width := false, false, 0
+		switch op {
+		case 0xD9:
+			switch reg {
+			case 0:
+				load, width = true, 4
+			case 2:
+				width = 4
+			case 3:
+				pop, width = true, 4
+			}
+		case 0xDB:
+			switch reg {
+			case 5:
+				load, width = true, 10
+			case 7:
+				pop, width = true, 10
+			}
+		case 0xDD:
+			switch reg {
+			case 0:
+				load, width = true, 8
+			case 2:
+				width = 8
+			case 3:
+				pop, width = true, 8
+			}
+		}
+		if width == 0 {
+			return nil, fmt.Errorf("cpu: unsupported x87 memory opcode %#02x /%d", op, reg)
+		}
+		return finish(func(e *Engine) (bool, error) {
+			if load {
+				return false, e.x87Load(rm, width)
+			}
+			return false, e.x87Store(rm, width, pop)
+		})
 	// -- one-byte ALU ops: ADD/OR/ADC/SBB/AND/SUB/XOR/CMP ------------
 	case op <= 0x3D && op&0xC0 == 0x00 && (op&0x07) <= 5:
 		idx := int(op >> 3)

@@ -21,6 +21,7 @@ func init() {
 	register(consts.SYS_chown, sysChown)
 	register(consts.SYS_lchown, sysLchown)
 	register(consts.SYS_fchown, sysFchown)
+	register(consts.SYS_fchownat, sysFchownat)
 	register(consts.SYS_umask, sysUmask)
 	register(consts.SYS_readlink, sysReadlink)
 	register(consts.SYS_readlinkat, sysReadlinkat)
@@ -181,22 +182,13 @@ func sysChmod(proc Proc, pathPtr, mode, _, _, _, _ uint64) (int64, error) {
 	return 0, nil
 }
 
-// chown/lchown/fchown are safely stubbed to succeed: this emulator
-// doesn't enforce per-file uid/gid ownership checks beyond what's
-// recorded in the vfs sidecar (see sysemu/syscalls.py's identical
-// sys_fchownat comment), so there's nothing to actually change other
-// than the bookkeeping value.
 func sysChown(proc Proc, pathPtr, uid, gid, _, _, _ uint64) (int64, error) {
 	path, ok := cstr(proc, pathPtr, 4096)
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
 	path = followSymlinks(proc, resolveAbs(proc, path))
-	if !proc.VFS().Exists(path) {
-		return int64(-errno.ENOENT), nil
-	}
-	_ = proc.VFS().SetMeta(path, func(m *vfs.Meta) { m.Uid, m.Gid = int(uid), int(gid) })
-	return 0, nil
+	return chownPath(proc, path, uid, gid), nil
 }
 
 func sysLchown(proc Proc, pathPtr, uid, gid, _, _, _ uint64) (int64, error) {
@@ -204,12 +196,7 @@ func sysLchown(proc Proc, pathPtr, uid, gid, _, _, _ uint64) (int64, error) {
 	if !ok {
 		return int64(-errno.EFAULT), nil
 	}
-	path = resolveAbs(proc, path)
-	if !proc.VFS().Exists(path) {
-		return int64(-errno.ENOENT), nil
-	}
-	_ = proc.VFS().SetMeta(path, func(m *vfs.Meta) { m.Uid, m.Gid = int(uid), int(gid) })
-	return 0, nil
+	return chownPath(proc, resolveAbs(proc, path), uid, gid), nil
 }
 
 func sysFchown(proc Proc, fdNum, uid, gid, _, _, _ uint64) (int64, error) {
@@ -218,9 +205,62 @@ func sysFchown(proc Proc, fdNum, uid, gid, _, _, _ uint64) (int64, error) {
 		return int64(-errno.EBADF), nil
 	}
 	if p := f.GuestPath(); p != "" {
-		_ = proc.VFS().SetMeta(p, func(m *vfs.Meta) { m.Uid, m.Gid = int(uid), int(gid) })
+		return chownPath(proc, p, uid, gid), nil
 	}
 	return 0, nil
+}
+
+func sysFchownat(proc Proc, dirfd, pathPtr, uid, gid, flags, _ uint64) (int64, error) {
+	path, ok := cstr(proc, pathPtr, 4096)
+	if !ok {
+		return int64(-errno.EFAULT), nil
+	}
+	allowed := uint64(consts.AT_SYMLINK_NOFOLLOW | consts.AT_EMPTY_PATH)
+	if flags&^allowed != 0 {
+		return int64(-errno.EINVAL), nil
+	}
+	if path == "" && flags&consts.AT_EMPTY_PATH == 0 {
+		return int64(-errno.ENOENT), nil
+	}
+	if path == "" && flags&consts.AT_EMPTY_PATH != 0 {
+		if int32(dirfd) == consts.AT_FDCWD {
+			path = proc.Cwd()
+		} else {
+			f := proc.Fds().Get(int(int32(dirfd)))
+			if f == nil || f.GuestPath() == "" {
+				return int64(-errno.EBADF), nil
+			}
+			path = f.GuestPath()
+		}
+	} else {
+		var errn int
+		path, errn = resolve(proc, int32(dirfd), path)
+		if errn != 0 {
+			return int64(-errn), nil
+		}
+	}
+	if flags&consts.AT_SYMLINK_NOFOLLOW == 0 {
+		path = followSymlinks(proc, path)
+	}
+	return chownPath(proc, path, uid, gid), nil
+}
+
+func chownPath(proc Proc, path string, uid, gid uint64) int64 {
+	if !proc.VFS().Exists(path) {
+		return int64(-errno.ENOENT)
+	}
+	err := proc.VFS().SetMeta(path, func(m *vfs.Meta) {
+		if uint32(uid) != ^uint32(0) {
+			m.Uid = int(uint32(uid))
+		}
+		if uint32(gid) != ^uint32(0) {
+			m.Gid = int(uint32(gid))
+		}
+	})
+	if err != nil {
+		return int64(-vfsErrno(err))
+	}
+	return 0
 }
 
 func sysUmask(proc Proc, mask, _, _, _, _, _ uint64) (int64, error) {

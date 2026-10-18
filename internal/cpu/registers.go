@@ -32,7 +32,10 @@ type Registers struct {
 	// the emulator does not currently change the host FPU rounding mode
 	// in response -- it always operates at round-to-nearest, which is
 	// what every normally-compiled program expects.
-	mxcsr uint32
+	mxcsr      uint32
+	x87        [8]ext80
+	x87Top     uint8
+	x87Control uint16
 }
 
 // EFLAGS bit positions used by flags.go.

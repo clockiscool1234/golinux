@@ -82,6 +82,10 @@
 package syscalls
 
 import (
+	"io"
+	"os"
+	"strings"
+
 	"golinux/internal/consts"
 	"golinux/internal/errno"
 )
@@ -92,6 +96,67 @@ func init() {
 	register(consts.SYS_vfork, sysVfork)
 	register(consts.SYS_clone, sysClone)
 	register(consts.SYS_wait4, sysWait4)
+}
+
+func execScript(proc Proc, guestPath string, argv []string) (string, []string, int) {
+	for depth := 0; depth <= 4; depth++ {
+		file, err := os.Open(proc.VFS().HostPath(guestPath))
+		if err != nil {
+			return "", nil, errno.EACCES
+		}
+		buf := make([]byte, 256)
+		n, readErr := io.ReadFull(file, buf)
+		file.Close()
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			return "", nil, errno.EIO
+		}
+		if n < 2 || buf[0] != '#' || buf[1] != '!' {
+			return guestPath, argv, 0
+		}
+		if depth == 4 {
+			return "", nil, errno.ENOEXEC
+		}
+		line := string(buf[2:n])
+		if newline := strings.IndexByte(line, '\n'); newline >= 0 {
+			line = line[:newline]
+		} else if n == len(buf) {
+			return "", nil, errno.ENOEXEC
+		}
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" {
+			return "", nil, errno.ENOEXEC
+		}
+		interpreter, optionalArg := line, ""
+		if split := strings.IndexAny(line, " \t"); split >= 0 {
+			interpreter = line[:split]
+			optionalArg = strings.TrimSpace(line[split:])
+		}
+		if !strings.HasPrefix(interpreter, "/") {
+			return "", nil, errno.ENOEXEC
+		}
+		interpreter = followSymlinks(proc, interpreter)
+		if !proc.VFS().Exists(interpreter) {
+			return "", nil, errno.ENOENT
+		}
+		meta, err := proc.VFS().GetMeta(interpreter)
+		if err != nil {
+			return "", nil, vfsErrno(err)
+		}
+		if meta.Type != "reg" {
+			return "", nil, errno.EACCES
+		}
+		interpreterArgv := make([]string, 0, len(argv)+2)
+		interpreterArgv = append(interpreterArgv, interpreter)
+		if optionalArg != "" {
+			interpreterArgv = append(interpreterArgv, optionalArg)
+		}
+		interpreterArgv = append(interpreterArgv, guestPath)
+		if len(argv) > 1 {
+			interpreterArgv = append(interpreterArgv, argv[1:]...)
+		}
+		guestPath, argv = interpreter, interpreterArgv
+	}
+	return "", nil, errno.ENOEXEC
 }
 
 func sysExecve(proc Proc, pathPtr, argvPtr, envpPtr, _, _, _ uint64) (int64, error) {
@@ -118,6 +183,10 @@ func sysExecve(proc Proc, pathPtr, argvPtr, envpPtr, _, _, _ uint64) (int64, err
 	argv := readCStrArray(proc, argvPtr)
 	if len(argv) == 0 {
 		argv = []string{path}
+	}
+	full, argv, errn := execScript(proc, full, argv)
+	if errn != 0 {
+		return int64(-errn), nil
 	}
 	var envp []string
 	if envpPtr != 0 {

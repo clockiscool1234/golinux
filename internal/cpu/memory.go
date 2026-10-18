@@ -29,18 +29,9 @@ type page struct {
 // otherwise be a hash-map lookup (hash the address, probe a bucket)
 // per byte fetched into a single integer comparison on the hot path.
 //
-// (An earlier version of this also memoized whole decoded
-// instructions per address, on the theory that most instructions
-// executed are re-executions of a handful of loop addresses. Measured
-// on real workloads -- an `apk` invocation and a shell arithmetic
-// loop -- it made both slower, not faster: the map lookup/insert/grow
-// overhead per instruction outweighed decodeOne's own cost more often
-// than not, and it added real correctness risk (see the FS/GS and
-// ModRM base/index register fixes in operand.go/modrm.go, both found
-// while making that cache correct -- ultimately kept because deferring
-// those to execute time is free and strictly more correct regardless
-// of caching, not because the cache needed them). Removed rather than
-// carried forward as apparently-dead-but-load-bearing complexity.)
+// The instruction decoder uses a page-indexed cache (see Engine.decodeCache)
+// to avoid hashing an instruction address on every execution. Code writes
+// and mapping changes invalidate that cache before the next instruction fetch.
 type Memory struct {
 	pages map[uint64]*page
 
@@ -48,11 +39,9 @@ type Memory struct {
 	cachedPage *page
 	cachedOK   bool
 
-	// codeDirty is set by any write touching a ProtExec page (see
-	// copy), and consumed by the owning Engine's decode cache: once
-	// set, the next instruction fetch bumps decodeCacheGen so stale
-	// cached decodes are dropped. The flag lives here rather than on
-	// Engine because copy/writeChecked only have the Memory.
+	// codeDirty is set by code writes and mapping changes, then consumed
+	// by the owning Engine before the next instruction fetch. The flag
+	// lives here because copy/writeChecked only have the Memory.
 	codeDirty bool
 }
 

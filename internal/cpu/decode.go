@@ -2,12 +2,9 @@ package cpu
 
 import "fmt"
 
-// cachedDecoded is one decodeCache entry. The whole cache is dropped
-// (and rebuilt) whenever guest code is written or the mapping shape
-// changes -- see Engine.decodeCache in cpu.go -- so entries carry no
-// generation tag themselves: presence in the map IS the validity.
-type cachedDecoded struct {
-	d *decoded
+// decodedPage is a direct-indexed cache for one guest code page.
+type decodedPage struct {
+	entries [pageSize]*decoded
 }
 
 // decoded is one fully-decoded instruction: its length in bytes (for

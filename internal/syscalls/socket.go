@@ -14,10 +14,8 @@
 // sendto/recvfrom (and plain send/recv, which the libc layers
 // implement as sendto/recvfrom with null sockaddr anyway), shutdown,
 // getsockname/getpeername, setsockopt/getsockopt, and socketpair.
-// sendmsg/recvmsg are registered but ENOSYS: nothing exercised so
-// far (musl's DNS resolver, apk's HTTP) needs scatter-gather or
-// real ancillary data, and the msghdr wire format is a whole file
-// on its own; see the comment on sysSendmsg.
+// sendmsg remains ENOSYS; recvmsg supports the one-iovec/name fields
+// used by musl's DNS resolver, but does not populate ancillary data.
 //
 // sockaddr translation: the guest hands us raw sockaddr blobs in
 // guest memory (family little-endian 16-bit first, then the
@@ -95,13 +93,15 @@ func (g *GuestSocket) Name() string      { return "socket" }
 func (g *GuestSocket) GuestPath() string { return "" }
 func (g *GuestSocket) IsDir() bool       { return false }
 func (g *GuestSocket) Close() error {
-	if g.f.fd >= 0 {
-		if debugHostFdLog != nil {
-			debugHostFdLog(g.f.fd)
-		}
-		return syscall.Close(g.f.fd)
+	if g.f.fd < 0 {
+		return nil
 	}
-	return nil
+	fd := g.f.fd
+	g.f.fd = -1
+	if debugHostFdLog != nil {
+		debugHostFdLog(fd)
+	}
+	return syscall.Close(fd)
 }
 
 func (g *GuestSocket) Read(n int) ([]byte, error) {
@@ -115,7 +115,7 @@ func (g *GuestSocket) Read(n int) ([]byte, error) {
 	}
 	if err != nil {
 		if err == syscall.EINTR {
-			return nil, nil
+			return nil, &fds.ErrnoError{Errno: errno.EINTR}
 		}
 		if err == syscall.EAGAIN && g.f.nonblock {
 			// Signal EAGAIN to the guest rather than a 0-byte read:
@@ -139,9 +139,12 @@ func (g *GuestSocket) Write(data []byte) (int, error) {
 	if k < 0 {
 		k = 0
 	}
-	if err != nil && err != syscall.EINTR {
+	if err != nil {
+		if err == syscall.EINTR {
+			return k, &fds.ErrnoError{Errno: errno.EINTR}
+		}
 		if err == syscall.EAGAIN && g.f.nonblock {
-			return 0, nil
+			return k, &fds.ErrnoError{Errno: errno.EAGAIN}
 		}
 		return k, err
 	}

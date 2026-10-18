@@ -1,8 +1,6 @@
 // Package fds implements a file descriptor table, ported from
-// sysemu/fds.py. It covers stdio streams, plain VFS-backed regular
-// files, directory handles (for getdents64), and host-backed pipes.
-// Sockets are the one entry kind not yet added, alongside the
-// syscalls that would need them.
+// sysemu/fds.py. It covers stdio streams, VFS-backed regular files,
+// directory handles, pipes, and host-backed sockets.
 package fds
 
 import (

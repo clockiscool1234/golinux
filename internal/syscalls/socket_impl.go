@@ -164,11 +164,15 @@ func sysBind(proc Proc, fdNum, addrPtr, addrlen, _, _, _ uint64) (int64, error) 
 		}
 		return int64(-errno.ENOTSOCK), nil
 	}
+	if addrlen < 2 || addrlen > 128 {
+		return int64(-errno.EINVAL), nil
+	}
 	blob, err := proc.MemRead(addrPtr, int(addrlen))
 	if err != nil {
 		return int64(-errno.EFAULT), nil
 	}
 	_, e := hostSyscall(syscall.SYS_BIND, uintptr(g.f.fd), uintptr(unsafe.Pointer(&blob[0])), uintptr(addrlen))
+	runtime.KeepAlive(blob)
 	if e != 0 {
 		return int64(-int(e)), nil
 	}
@@ -210,7 +214,7 @@ func sysAccept(proc Proc, fdNum, addrPtr, lenPtr, flags, _, _ uint64) (int64, er
 	var newfd uintptr
 	var e syscall.Errno
 	if flags != 0 {
-		newfd, e = hostSyscall(syscall.SYS_ACCEPT4, uintptr(g.f.fd), 0, uintptr(flags))
+		newfd, e = hostSyscall(syscall.SYS_ACCEPT4, uintptr(g.f.fd), 0, 0, uintptr(flags))
 	} else {
 		newfd, e = hostSyscall(syscall.SYS_ACCEPT, uintptr(g.f.fd), 0, 0)
 	}
@@ -218,6 +222,7 @@ func sysAccept(proc Proc, fdNum, addrPtr, lenPtr, flags, _, _ uint64) (int64, er
 		return int64(-int(e)), nil
 	}
 	ng := NewGuestSocket(int(newfd), true)
+	ng.f.nonblock = flags&consts.SOCK_NONBLOCK_C != 0
 	ngfd := proc.Fds().Alloc(ng)
 	if flags&consts.SOCK_CLOEXEC_C != 0 {
 		proc.Fds().SetCloexec(ngfd, true)
@@ -295,24 +300,32 @@ func sysSendto(proc Proc, fdNum, bufPtr, length, flags, addrPtr, addrlen uint64)
 		}
 		return int64(-errno.ENOTSOCK), nil
 	}
+	if length > uint64(^uint(0)>>1) {
+		return int64(-errno.EINVAL), nil
+	}
 	data, err := proc.MemRead(bufPtr, int(length))
 	if err != nil {
 		return int64(-errno.EFAULT), nil
 	}
+	var dataPtr uintptr
+	if len(data) > 0 {
+		dataPtr = uintptr(unsafe.Pointer(&data[0]))
+	}
 	var destPtr uintptr
-	if addrPtr != 0 && addrlen >= 2 {
-		blob, err := proc.MemRead(addrPtr, int(addrlen))
+	var dest []byte
+	if addrPtr != 0 {
+		if addrlen < 2 || addrlen > 128 || addrlen > uint64(^uint(0)>>1) {
+			return int64(-errno.EINVAL), nil
+		}
+		dest, err = proc.MemRead(addrPtr, int(addrlen))
 		if err != nil {
 			return int64(-errno.EFAULT), nil
 		}
-		destPtr = uintptr(unsafe.Pointer(&blob[0]))
-		// blob must stay alive through the syscall.
-		defer keepAlive(blob)
+		destPtr = uintptr(unsafe.Pointer(&dest[0]))
 	}
-	n, e := hostSyscall(syscall.SYS_SENDTO, uintptr(g.f.fd), uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)), uintptr(flags), uintptr(destPtr), uintptr(addrlen))
-	if length > 0 && len(data) == 0 {
-		return int64(-errno.EFAULT), nil
-	}
+	n, e := hostSyscall(syscall.SYS_SENDTO, uintptr(g.f.fd), dataPtr, uintptr(len(data)), uintptr(flags), destPtr, uintptr(addrlen))
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(dest)
 	if e != 0 {
 		return int64(-int(e)), nil
 	}
@@ -329,28 +342,71 @@ func sysRecvfrom(proc Proc, fdNum, bufPtr, length, flags, addrPtr, lenPtr uint64
 		}
 		return int64(-errno.ENOTSOCK), nil
 	}
-	buf := make([]byte, length)
-	var src [128]byte
-	srcLen := uint32(len(src))
-	var srcPtr uintptr
-	if addrPtr != 0 {
-		srcPtr = uintptr(unsafe.Pointer(&src[0]))
+	if length > uint64(^uint(0)>>1) {
+		return int64(-errno.EINVAL), nil
 	}
-	n, e := hostSyscall(syscall.SYS_RECVFROM, uintptr(g.f.fd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(srcPtr), uintptr(unsafe.Pointer(&srcLen)))
+	if addrPtr != 0 && lenPtr == 0 {
+		return int64(-errno.EFAULT), nil
+	}
+	buf := make([]byte, int(length))
+	var bufPtrHost uintptr
+	if len(buf) > 0 {
+		bufPtrHost = uintptr(unsafe.Pointer(&buf[0]))
+	}
+	var src [128]byte
+	var srcLen uint32
+	var srcPtr, srcLenPtr uintptr
+	if addrPtr != 0 {
+		lenBuf, err := proc.MemRead(lenPtr, 4)
+		if err != nil {
+			return int64(-errno.EFAULT), nil
+		}
+		guestSrcLen := binary.LittleEndian.Uint32(lenBuf)
+		srcLen = guestSrcLen
+		if srcLen > uint32(len(src)) {
+			srcLen = uint32(len(src))
+		}
+		srcPtr = uintptr(unsafe.Pointer(&src[0]))
+		srcLenPtr = uintptr(unsafe.Pointer(&srcLen))
+	}
+	n, e := hostSyscall(syscall.SYS_RECVFROM, uintptr(g.f.fd), bufPtrHost, uintptr(len(buf)), uintptr(flags), srcPtr, srcLenPtr)
+	runtime.KeepAlive(buf)
+	runtime.KeepAlive(src)
+	runtime.KeepAlive(&srcLen)
 	if e != 0 {
 		return int64(-int(e)), nil
 	}
-	if int64(n) > int64(len(buf)) {
-		n = uintptr(len(buf))
+	writeLen := len(buf)
+	if n < uintptr(writeLen) {
+		writeLen = int(n)
 	}
-	if err := proc.MemWrite(bufPtr, buf[:n]); err != nil {
-		return int64(-errno.EFAULT), nil
+	if writeLen > 0 {
+		if err := proc.MemWrite(bufPtr, buf[:writeLen]); err != nil {
+			return int64(-errno.EFAULT), nil
+		}
 	}
-	if srcPtr != 0 && lenPtr != 0 && srcLen > 0 {
-		lb := make([]byte, 4)
-		binary.LittleEndian.PutUint32(lb, srcLen)
-		if proc.MemWrite(lenPtr, lb) == nil {
-			_ = proc.MemWrite(addrPtr, src[:srcLen])
+	if addrPtr != 0 {
+		addrWriteLen := int(srcLen)
+		if addrWriteLen > len(src) {
+			addrWriteLen = len(src)
+		}
+		guestSrcLen, err := proc.MemRead(lenPtr, 4)
+		if err != nil {
+			return int64(-errno.EFAULT), nil
+		}
+		guestCap := int(binary.LittleEndian.Uint32(guestSrcLen))
+		if addrWriteLen > guestCap {
+			addrWriteLen = guestCap
+		}
+		if addrWriteLen > 0 {
+			if err := proc.MemWrite(addrPtr, src[:addrWriteLen]); err != nil {
+				return int64(-errno.EFAULT), nil
+			}
+		}
+		outLen := make([]byte, 4)
+		binary.LittleEndian.PutUint32(outLen, srcLen)
+		if err := proc.MemWrite(lenPtr, outLen); err != nil {
+			return int64(-errno.EFAULT), nil
 		}
 	}
 	return int64(n), nil
@@ -510,13 +566,15 @@ func sysSendmsg(proc Proc, fdNum, msgPtr, flags, _, _, _ uint64) (int64, error) 
 }
 
 // msghdr is struct msghdr on linux/amd64, as the guest lays it out:
-//   void *msg_name       (8)   optional sockaddr
-//   socklen_t msg_namelen(4) + 4 pad
-//   struct iovec *msg_iov(8)   scatter-gather array
-//   size_t msg_iovlen    (8)   its length
-//   void *msg_control    (8)   ancillary data
-//   size_t msg_controllen(8)
-//   int msg_flags        (4) + 4 pad
+//
+//	void *msg_name       (8)   optional sockaddr
+//	socklen_t msg_namelen(4) + 4 pad
+//	struct iovec *msg_iov(8)   scatter-gather array
+//	size_t msg_iovlen    (8)   its length
+//	void *msg_control    (8)   ancillary data
+//	size_t msg_controllen(8)
+//	int msg_flags        (4) + 4 pad
+//
 // = 56 bytes total.
 const msghdrSize = 56
 
@@ -557,13 +615,20 @@ func sysRecvmsg(proc Proc, fdNum, msgPtr, flags, _, _, _ uint64) (int64, error) 
 		return int64(-errno.EMSGSIZE), nil
 	}
 	buf := make([]byte, total)
+	var bufPtr uintptr
+	if len(buf) > 0 {
+		bufPtr = uintptr(unsafe.Pointer(&buf[0]))
+	}
 	var src [128]byte
 	srcLen := uint32(len(src))
 	var srcPtr uintptr
 	if msgName != 0 {
 		srcPtr = uintptr(unsafe.Pointer(&src[0]))
 	}
-	n, e := hostSyscall(syscall.SYS_RECVFROM, uintptr(g.f.fd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(flags), uintptr(srcPtr), uintptr(unsafe.Pointer(&srcLen)))
+	n, e := hostSyscall(syscall.SYS_RECVFROM, uintptr(g.f.fd), bufPtr, uintptr(len(buf)), uintptr(flags), srcPtr, uintptr(unsafe.Pointer(&srcLen)))
+	runtime.KeepAlive(buf)
+	runtime.KeepAlive(src)
+	runtime.KeepAlive(&srcLen)
 	if e != 0 {
 		return int64(-int(e)), nil
 	}

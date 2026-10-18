@@ -180,27 +180,16 @@ type Engine struct {
 
 	stopRequested bool
 
-	// decodeCache memoizes fully-decoded instructions by their start
-	// RIP. Its correctness relies on two properties of the exec
-	// closures decodeOne builds: they resolve register-based operands
-	// (ModRM base/index, RIP-relative, FS/GS segments) lazily at
-	// execute time (see operand.go), so a cached instruction never
-	// freezes register or segment state. The remaining hazard is
-	// self-modifying code and mapping changes, handled by dropping the
-	// whole cache: EmuStart polls Memory.consumeCodeDirty (set by every
-	// map/unmap/protect and by any write to a ProtExec page) at the
-	// top of each fetch and rebuilds the map from scratch when it
-	// fires.
-	//
-	// This is the second attempt at this cache: the first (see
-	// Memory's doc comment) mapped one entry per instruction address
-	// and measured slower on `apk` and shell-loop workloads. The
-	// difference now is the failure mode being fixed: an HTTPS
-	// handshake's 26-second cert-parse window, which is decode-heavy
-	// LibreSSL code where the memoization wins by a wide margin (the
-	// map cost is one lookup per executed instruction; the decode it
-	// skips is an allocation-heavy prefix/ModRM/imm walk).
-	decodeCache map[uint64]*cachedDecoded
+	// decodeCache stores decoded instructions in page-sized direct
+	// tables. The current page is held separately so the hot path needs
+	// only an array access per instruction; the map is consulted only
+	// when execution crosses into another code page. Entries are safe
+	// to reuse because decodeOne resolves register-dependent operands
+	// at execution time. Any code write or mapping change drops the
+	// cache before the next instruction fetch.
+	decodeCache          map[uint64]*decodedPage
+	cachedDecodePageAddr uint64
+	cachedDecodePage     *decodedPage
 
 	// curInstrEnd is the address just past the instruction currently
 	// executing -- set by the fetch/decode/execute loop right before
@@ -218,7 +207,7 @@ func NewEngine() (*Engine, error) {
 	return &Engine{
 		mem:         newMemory(),
 		insnHooks:   make(map[int]insnHook),
-		decodeCache: make(map[uint64]*cachedDecoded),
+		decodeCache: make(map[uint64]*decodedPage),
 	}, nil
 }
 
@@ -247,7 +236,7 @@ func (e *Engine) Clone() *Engine {
 		// a copy -- a later write to an exec page in either engine
 		// doesn't invalidate the other's cache. Starting empty is the
 		// cheap correct answer.
-		decodeCache: make(map[uint64]*cachedDecoded),
+		decodeCache: make(map[uint64]*decodedPage),
 	}
 }
 
@@ -443,13 +432,26 @@ func (e *Engine) EmuStart(begin, until uint64) error {
 		// in the write path itself because the write path only has the
 		// Memory, not the owning Engine.
 		if e.mem.consumeCodeDirty() {
-			e.decodeCache = make(map[uint64]*cachedDecoded)
+			e.decodeCache = make(map[uint64]*decodedPage)
+			e.cachedDecodePage = nil
+		}
+
+		pageAddr := pc &^ uint64(pageMask)
+		page := e.cachedDecodePage
+		if page == nil || e.cachedDecodePageAddr != pageAddr {
+			page = e.decodeCache[pageAddr]
+			if page == nil {
+				page = &decodedPage{}
+				e.decodeCache[pageAddr] = page
+			}
+			e.cachedDecodePageAddr = pageAddr
+			e.cachedDecodePage = page
 		}
 
 		var d *decoded
-		if cached, ok := e.decodeCache[pc]; ok {
-			d = cached.d
-		} else {
+		idx := pc & uint64(pageMask)
+		d = page.entries[idx]
+		if d == nil {
 			var err error
 			d, err = e.decodeOne(pc)
 			if err != nil {
@@ -459,7 +461,7 @@ func (e *Engine) EmuStart(begin, until uint64) error {
 				}
 				continue // hook mapped the memory; retry the same instruction
 			}
-			e.decodeCache[pc] = &cachedDecoded{d: d}
+			page.entries[idx] = d
 		}
 		e.curInstrEnd = pc + uint64(d.len)
 

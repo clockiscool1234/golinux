@@ -17,7 +17,7 @@ const (
 // baked into addr at decode time -- deliberately mirroring how
 // ripRelative/ripDisp already defer RIP-relative resolution below.
 // That laziness isn't just tidiness: decoded instructions are cached
-// by address (see Memory.decodeCache) and reused across every
+// by address (see Engine.decodeCache) and reused across every
 // subsequent execution of that address, so any address arithmetic
 // that depends on state which can change between executions -- like
 // the FS/GS base, which a real program sets up via arch_prctl(2)
@@ -57,7 +57,7 @@ const (
 //  3. Otherwise: addr is used directly, already fully resolved.
 //
 // Why (2) matters as much as (1): decoded instructions are cached by
-// address (see Memory.decodeCache) and reused across every subsequent
+// address (see Engine.decodeCache) and reused across every subsequent
 // execution of that address. Almost every memory operand in real code
 // is register-relative -- array/loop indexing, stack locals, struct
 // fields -- so if decodeModRM baked in whatever the base/index

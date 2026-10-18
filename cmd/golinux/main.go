@@ -19,9 +19,9 @@
 //	-w, --cwd              initial guest working directory
 //	-I, --host-file        import a host file into the VFS before running (repeatable)
 //
-// This pass supports the flags needed to run a simple statically-
-// linked hello-world binary plus real filesystem/process-info
-// programs. Networking and --native-perms are not wired up yet.
+// The guest can use host-backed IPv4/IPv6 and Unix sockets. If its rootfs
+// lacks /etc/resolv.conf, the host resolver configuration is imported at
+// startup so guest DNS lookups can use the host's configured nameservers.
 package main
 
 import (
@@ -105,14 +105,14 @@ func main() {
 
 func run() int {
 	var (
-		vfsRoot     string
-		verbose     bool
-		cwd         string
-		noAutoMnt   bool
-		extractTar  string
-		hostFiles   stringList
-		envVars     stringList
-		cpuProfile  string
+		vfsRoot    string
+		verbose    bool
+		cwd        string
+		noAutoMnt  bool
+		extractTar string
+		hostFiles  stringList
+		envVars    stringList
+		cpuProfile string
 	)
 	stringFlag(&vfsRoot, "r", "vfs-root", "./vfsroot", "host directory backing the guest '/'")
 	boolFlag(&verbose, "v", "verbose", false, "log every syscall to stderr")
@@ -204,6 +204,10 @@ func run() int {
 			return 1
 		}
 	}
+	if err := ensureHostResolver(vv, "/etc/resolv.conf"); err != nil {
+		fmt.Fprintf(os.Stderr, "golinux: importing host resolver configuration: %v\n", err)
+		return 1
+	}
 
 	envp := []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -279,6 +283,19 @@ func autoMount(vv *vfs.VFS) error {
 		return err
 	}
 	return vv.Mount("devtmpfs", "/dev", "devtmpfs", 0, "")
+}
+
+func ensureHostResolver(vv *vfs.VFS, hostResolvConf string) error {
+	if vv.Exists("/etc/resolv.conf") {
+		return nil
+	}
+	if _, err := os.Stat(hostResolvConf); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect host resolver configuration: %w", err)
+	}
+	return vv.ImportHostFile(hostResolvConf, "/etc/resolv.conf", 0o644)
 }
 
 // splitHostSpec splits a "HOST:GUEST" spec (used by -I/--host-file)

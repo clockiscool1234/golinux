@@ -1,13 +1,5 @@
-// poll.go implements poll(2) and ppoll(2) -- previously both were
-// unconditionally ENOSYS (see syscalls.go's package doc comment and
-// the note that used to live in misc.go), which broke every
-// interactive shell's line editor: busybox ash calls poll() on stdin
-// before every read and, on ENOSYS, logs "sh: poll: Function not
-// implemented" once per prompt. select()/pselect6() are NOT covered
-// here and remain ENOSYS -- same reasoning as before (they'd need the
-// same host-fd-aware plumbing this file adds, just for a different
-// wire format; left for a follow-up pass since nothing exercised so
-// far needs them).
+// poll.go implements poll(2) and ppoll(2) over host-backed descriptors.
+// select(2) and pselect6(2) use the same readiness plumbing in select.go.
 //
 // The key realization that makes a real (not fake-always-ready)
 // implementation safe here: since internal/emulator gives every guest

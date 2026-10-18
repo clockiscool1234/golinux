@@ -27,25 +27,15 @@
 //	signal.go   rt_sigaction/rt_sigprocmask/kill/tgkill (stubs for now)
 //	mount.go    mount/umount2/chroot/sethostname
 //	misc.go     getrlimit/statfs/sync/flock/ftruncate/... (stubs)
-//	fork.go     execve (real); fork/vfork/clone/wait4 (ENOSYS, see file)
+//	fork.go     execve/fork/vfork/clone/wait4 (process-shaped forks)
 //	exit.go     exit/exit_group
-//	poll.go     poll/ppoll (real, host-fd-backed; select/pselect6 still stubbed)
+//	poll.go     poll/ppoll/select/pselect6 (host-fd-backed)
+//	socket.go   IPv4/IPv6/Unix socket syscalls; sendmsg is still stubbed
 //
-// This pass covers real filesystem access, process/identity
-// introspection, in-place execve(), and synthetic /proc and /dev
-// content (see the procfs and devices packages, wired in via file.go
-// and fs_meta.go). Not yet implemented, each for a specific reason
-// documented in its would-be file:
-//   - fork/vfork/clone/wait4: Go's runtime isn't fork-safe (see
-//     fork.go) -- needs a different design than a direct port.
-//   - Real signal delivery: needs the sigtramp/context-switch
-//     machinery from sysemu/emulator.py, not yet ported.
-//   - select/pselect6: same reasoning poll/ppoll used to fall under --
-//     need real multiplexed I/O over the fd table for their fd_set
-//     wire format; stubbed conservatively for now (see misc.go).
-//     poll/ppoll themselves are implemented (see poll.go).
-//   - sockets (socket/connect/bind/...): a whole subsystem on its
-//     own; not started yet.
+// This pass covers filesystem access, process/identity introspection,
+// in-place execve(), synthetic /proc and /dev content, multiplexed I/O,
+// and host-backed sockets. Real signal delivery remains unimplemented:
+// it needs the sigtramp/context-switch machinery from sysemu/emulator.py.
 package syscalls
 
 import (

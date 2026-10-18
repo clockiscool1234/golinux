@@ -144,10 +144,11 @@ handled as in-memory pseudo-devices.
 
 ### What's implemented
 
-~115 syscalls across file I/O, filesystem metadata, directory
-operations, memory management (`brk`/`mmap`/`mprotect`), multi-process
-support (`fork`/`vfork`/`clone`/`wait4`, see above), process/identity
-introspection, time, terminal control, and mount table management —
+136 syscall numbers currently have handlers across file I/O, filesystem
+metadata, directory operations, memory management (`brk`/`mmap`/`mprotect`),
+multi-process support (`fork`/`vfork`/`clone`/`wait4`, see above),
+process/identity introspection, time, terminal control, multiplexed I/O,
+and host-backed networking —
 see the doc comment at the top of `internal/syscalls/syscalls.go` for
 the full category breakdown and exactly what's stubbed vs. real.
 
@@ -161,21 +162,24 @@ interactive shells behave properly (printing a prompt, etc.) when
 actually run under a real terminal. Every other `ioctl` request reports
 `ENOTTY`/`ENOSYS` as appropriate rather than silently lying.
 
-**Deliberately not implemented yet**, each for a specific reason
-documented in the corresponding file:
+### Networking
 
-- **Real signal delivery** (`signal.go`) — `sigaction`/`sigprocmask`
-  etc. report success so guest startup doesn't abort, but no sigtramp/
-  context-switch machinery exists yet to actually invoke a registered
-  handler.
-- **`poll`/`select`/`ppoll`/`pselect6`** — need real multiplexed I/O
-  across the fd table; reports `ENOSYS` rather than a fake stub that
-  would make callers spin or hang confusingly. Interactive shells with
-  a real terminal attached (see `ioctl` above) are more likely to hit
-  this now than before, since `isatty()` succeeding unlocks line-
-  editing/job-control code paths that a program previously skipped
-  entirely when it believed it wasn't attached to a terminal.
-- **Sockets** — not started.
+IPv4/IPv6 TCP and UDP, plus Unix-domain sockets, are backed by real host
+sockets. This supports guest DNS lookups and outbound HTTP/HTTPS when
+the host can reach the destination. If the guest rootfs has no
+`/etc/resolv.conf`, GoLinux imports the host's resolver configuration
+at startup; an existing guest resolver file is left untouched and can
+be overridden explicitly with `--host-file`.
+
+This is host networking, not network isolation: guest sockets share the
+host's network reachability and are subject to the host's network
+policy. `sendmsg` and ancillary socket data are not implemented; the
+`recvmsg` subset used by musl's DNS resolver is supported.
+
+**Deliberately not implemented yet:** real signal delivery
+(`signal.go`) — `sigaction`/`sigprocmask` report success so guest
+startup doesn't abort, but there is no sigtramp/context-switch
+machinery yet to invoke a registered handler.
 
 ## Building
 

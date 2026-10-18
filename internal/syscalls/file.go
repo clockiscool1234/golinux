@@ -2,7 +2,6 @@ package syscalls
 
 import (
 	"os"
-	"syscall"
 
 	"golinux/internal/consts"
 	"golinux/internal/devices"
@@ -417,7 +416,7 @@ func sysFcntl(proc Proc, fdNum, cmd, arg, _, _, _ uint64) (int64, error) {
 		// musl/glibc connect/accept retry loops to decide whether to
 		// block); everything else here never blocks, so 0.
 		if g, isSock := f.(*GuestSocket); isSock {
-			fl, e := hostSyscall(syscall.SYS_FCNTL, uintptr(g.f.fd), uintptr(consts.F_GETFL), 0)
+			fl, e := hostSocketGetFlags(g)
 			if e != 0 {
 				return int64(-int(e)), nil
 			}
@@ -431,8 +430,7 @@ func sysFcntl(proc Proc, fdNum, cmd, arg, _, _, _ uint64) (int64, error) {
 		// O_NONBLOCK bit is honored; the guest kernel would accept
 		// more, but nothing exercised here sets others on sockets.
 		if g, isSock := f.(*GuestSocket); isSock {
-			_, e := hostSyscall(syscall.SYS_FCNTL, uintptr(g.f.fd), uintptr(consts.F_SETFL), uintptr(arg&consts.O_NONBLOCK))
-			if e != 0 {
+			if e := hostSocketSetFlags(g, int(arg&consts.O_NONBLOCK)); e != 0 {
 				return int64(-int(e)), nil
 			}
 			g.f.nonblock = arg&consts.O_NONBLOCK != 0

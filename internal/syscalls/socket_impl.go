@@ -1,3 +1,5 @@
+//go:build linux
+
 // socket_impl.go holds the socket(2) syscall handlers themselves;
 // socket.go holds the GuestSocket fds.File wrapper they all funnel
 // through, plus the package doc comment explaining the host-backed
@@ -66,17 +68,6 @@ func guestDomain(family uint64) (int, bool) {
 	}
 }
 
-// debugHostFdLog, when non-nil, is called for every guest-socket host
-// fd creation (negative fd) and close (positive fd) -- a temporary
-// instrumentation hook for auditing the host-fd lifecycle across
-// fork/dup2/exec. Normally nil; cmd/golinux sets it when
-// GOLINUX_DEBUG_HOSTFD is in the environment.
-var debugHostFdLog func(fd int)
-
-// SetDebugHostFdLog installs the instrumentation hook described on
-// debugHostFdLog (nil clears it).
-func SetDebugHostFdLog(f func(fd int)) { debugHostFdLog = f }
-
 // sysSocket is socket(domain, type, protocol).
 func sysSocket(proc Proc, domain, sockType, protocol, _, _, _ uint64) (int64, error) {
 	fam, ok := guestDomain(domain)
@@ -96,8 +87,11 @@ func sysSocket(proc Proc, domain, sockType, protocol, _, _, _ uint64) (int64, er
 	}
 	g := NewGuestSocket(int(fd), t == consts.SOCK_STREAM)
 	if sockType&consts.SOCK_NONBLOCK_C != 0 {
+		if e := hostSocketSetFlags(g, consts.O_NONBLOCK); e != 0 {
+			_ = g.Close()
+			return int64(-int(e)), nil
+		}
 		g.f.nonblock = true
-		_, _ = hostSyscall(syscall.SYS_FCNTL, fd, uintptr(consts.F_SETFL), uintptr(consts.O_NONBLOCK))
 	}
 	gfd := proc.Fds().Alloc(g)
 	if sockType&consts.SOCK_CLOEXEC_C != 0 {
@@ -211,13 +205,7 @@ func sysAccept(proc Proc, fdNum, addrPtr, lenPtr, flags, _, _ uint64) (int64, er
 	// accept4(2) when flags came in, else accept(2). Using SYS_ACCEPT4
 	// with flags==0 is equivalent to accept(2), but SYS_ACCEPT4 isn't
 	// available on every host Go builds for, so fall back cleanly.
-	var newfd uintptr
-	var e syscall.Errno
-	if flags != 0 {
-		newfd, e = hostSyscall(syscall.SYS_ACCEPT4, uintptr(g.f.fd), 0, 0, uintptr(flags))
-	} else {
-		newfd, e = hostSyscall(syscall.SYS_ACCEPT, uintptr(g.f.fd), 0, 0)
-	}
+	newfd, e := hostAccept(g.f.fd, flags)
 	if e != 0 {
 		return int64(-int(e)), nil
 	}
@@ -452,10 +440,18 @@ func sysSocketpair(proc Proc, domain, sockType, protocol, svPtr, _, _ uint64) (i
 	fd0 := proc.Fds().Alloc(g0)
 	fd1 := proc.Fds().Alloc(g1)
 	if sockType&consts.SOCK_NONBLOCK_C != 0 {
+		if e := hostSocketSetFlags(g0, consts.O_NONBLOCK); e != 0 {
+			_ = g0.Close()
+			_ = g1.Close()
+			return int64(-int(e)), nil
+		}
+		if e := hostSocketSetFlags(g1, consts.O_NONBLOCK); e != 0 {
+			_ = g0.Close()
+			_ = g1.Close()
+			return int64(-int(e)), nil
+		}
 		g0.f.nonblock = true
 		g1.f.nonblock = true
-		_, _ = hostSyscall(syscall.SYS_FCNTL, uintptr(sv[0]), uintptr(consts.F_SETFL), uintptr(consts.O_NONBLOCK))
-		_, _ = hostSyscall(syscall.SYS_FCNTL, uintptr(sv[1]), uintptr(consts.F_SETFL), uintptr(consts.O_NONBLOCK))
 	}
 	out := make([]byte, 8)
 	binary.LittleEndian.PutUint32(out[0:4], uint32(fd0))

@@ -228,6 +228,15 @@ git clone https://github.com/clockiscool1234/golinux.git && cd golinux
 go build -o golinux ./cmd/golinux
 ```
 
+Cross-build from any Go-supported host (verified for Windows amd64/arm64 and macOS amd64/arm64):
+
+```bash
+GOOS=windows GOARCH=amd64 go build -o golinux.exe ./cmd/golinux
+GOOS=windows GOARCH=arm64 go build -o golinux.exe ./cmd/golinux
+GOOS=darwin GOARCH=amd64 go build -o golinux ./cmd/golinux
+GOOS=darwin GOARCH=arm64 go build -o golinux ./cmd/golinux
+```
+
 ### Test
 
 ```bash
@@ -281,57 +290,9 @@ Run `./golinux -h` for the full flag list.
 
 ## Does this work on other operating systems?
 
-**Building and running `golinux` itself currently requires Linux.**
-Not because of anything fundamental about emulating a Linux guest —
-it's because a handful of *host*-side syscalls used for real process-
-group/session/job-control semantics (`internal/syscalls/process.go`),
-for populating `native-perms` file stats (`internal/vfs/vfs.go`), and
-for forwarding terminal `ioctl`s to the real host tty (`internal/
-syscalls/ioctl.go`) call directly into Go's `syscall` package using
-Linux-specific types and syscall numbers (`syscall.Stat_t`'s field
-layout, a raw `syscall.SYS_GETSID` — Go's standard library doesn't wrap
-`getsid` at all on any platform, so this port reaches for the raw
-syscall number directly — and `syscall.SYS_IOCTL` with Linux `struct
-termios`/`struct winsize` layouts). Neither of those compiles on macOS
-or Windows as written.
+**The CLI cross-builds for Linux, macOS, and Windows.** The CPU and emulator are pure Go. Host-backed socket syscalls are currently implemented only on Linux; on macOS and Windows they return `ENOSYS`, so guest DNS and internet access are Linux-only. Terminal ioctls return `ENOTTY` on macOS and Windows, and Windows uses simplified polling and process-group behavior.
 
-`fork`/`vfork`/`clone`/`wait4` (see "Multi-process support" above) are
-the one area that's already fully portable despite the general Linux-
-only caveat above: the whole point of that design is that it never
-calls the host's real `fork(2)` at all, so it carries no new platform
-dependency — it's ordinary Go control flow (structs, goroutines,
-channels) from top to bottom.
-
-The good news for the rest is that this is a small, contained problem,
-not an architectural one:
-
-- **`internal/cpu`, the engine `internal/emulator` actually uses now,
-  is pure Go with no cgo or C-toolchain dependency at all** — the
-  original cgo binding to `libunicorn` (`internal/uc`) is no longer on
-  the hot path, so there's no C-library cross-platform story to verify
-  in the first place.
-- **The VFS's sidecar-metadata design was chosen specifically to avoid
-  relying on host filesystem permissions** (see "The virtual
-  filesystem" above) — no `chown`/`chmod`/real symlinks means no
-  platform-specific permission model to reconcile, which is normally
-  the hardest part of porting this kind of tool.
-- **The problem spots are narrow and already isolated** to
-  `sysGetpgrp`/`sysGetpgid`/`sysSetpgid`/`sysGetsid`/`sysSetsid` in
-  `process.go`, the `native_perms` branch of `vfs.Stat`/`vfs.GetMeta`
-  in `vfs.go`, and `sysIoctl`'s real-syscall forwarding in `ioctl.go`.
-  None is on the path any of the tests in this repo exercise (the
-  default is `native_perms=false`, and job control/terminal ioctls
-  only matter for interactive shell-style programs, not the batch/
-  one-shot use case this CLI covers).
-
-Making this genuinely cross-platform would mean splitting those spots
-into `_linux.go`/`_darwin.go`/`_windows.go` files behind Go build tags,
-each doing the platform-appropriate thing (or, on Windows, returning a
-sensible stub since job-control groups and POSIX termios don't really
-exist there).
-
-Contributions doing that split are welcome — the boundaries are
-already clean, it's just work nobody's done yet.
+Process-shaped `fork`/`vfork`/`clone`/`wait4` are implemented with Go state copies and goroutines rather than calling the host's `fork(2)`, so they work across the supported build targets.
 
 ## Project layout
 

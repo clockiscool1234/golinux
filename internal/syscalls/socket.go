@@ -1,14 +1,7 @@
-// socket.go implements the socket(2) family, host-backed: every
-// guest socket IS a real host socket (created via Go's syscall/
-// net packages), wrapped as a fds.File so it lands in the normal fd
-// table. That's the same "forward to the real host fd" strategy
-// ioctl.go and poll.go already use for stdio and pipes, and it buys
-// this file the same two properties those rely on: real, honest
-// blocking/timeout semantics without any event-loop machinery, and
-// automatic poll(2) support -- a guest socket's Read blocks only its
-// own goroutine, exactly like a real blocking socket blocks only its
-// calling thread, and poll.go's hostFdForFile forwards socket fds to
-// the host poll(2) alongside pipes and stdio.
+// socket.go holds the GuestSocket file-descriptor wrapper. Linux
+// provides the host-backed socket(2) implementation; macOS and
+// Windows currently build and run the emulator with socket syscalls
+// returning ENOSYS (see socket_impl_stub.go).
 //
 // What's covered: socket, connect, bind, listen, accept/accept4,
 // sendto/recvfrom (and plain send/recv, which the libc layers
@@ -17,16 +10,8 @@
 // sendmsg remains ENOSYS; recvmsg supports the one-iovec/name fields
 // used by musl's DNS resolver, but does not populate ancillary data.
 //
-// sockaddr translation: the guest hands us raw sockaddr blobs in
-// guest memory (family little-endian 16-bit first, then the
-// family-specific bytes, exactly the wire format a real kernel
-// copies in). AF_INET/AF_INET6/AF_UNIX layouts are identical
-// between this emulator's x86_64 guests and every host Go targets
-// here, so the blob is passed through byte-for-byte after family
-// validation. getsockname/getpeername write the host's sockaddr back
-// out in the same wire format, so no translation layer is needed
-// anywhere -- a deliberate narrowness: anything exotic (AF_NETLINK
-// mostly) returns EAFNOSUPPORT rather than pretending.
+// On Linux, guest sockaddr blobs use the host kernel's Linux x86-64
+// layout and are passed through byte-for-byte after family validation.
 package syscalls
 
 // sysSendmsg / sysRecvmsg live in socket_impl.go along with every
@@ -35,8 +20,6 @@ package syscalls
 // syscalls.go) for the host-backed design.
 
 import (
-	"syscall"
-
 	"golinux/internal/consts"
 	"golinux/internal/errno"
 	"golinux/internal/fds"
@@ -77,6 +60,10 @@ type netFD struct {
 	nonblock bool
 }
 
+var debugHostFdLog func(fd int)
+
+func SetDebugHostFdLog(f func(fd int)) { debugHostFdLog = f }
+
 // NewGuestSocket exposes the socket constructor to any other
 // package that needs to hand a real host socket to the guest (the
 // way devices.NewStreamDev lets other packages build pseudo-devices
@@ -101,7 +88,7 @@ func (g *GuestSocket) Close() error {
 	if debugHostFdLog != nil {
 		debugHostFdLog(fd)
 	}
-	return syscall.Close(fd)
+	return hostSocketClose(fd)
 }
 
 func (g *GuestSocket) Read(n int) ([]byte, error) {
@@ -109,44 +96,31 @@ func (g *GuestSocket) Read(n int) ([]byte, error) {
 		return nil, nil
 	}
 	buf := make([]byte, n)
-	k, err := syscall.Read(g.f.fd, buf)
+	k, err := hostSocketRead(g.f.fd, buf)
 	if k > 0 {
 		return buf[:k], nil
 	}
 	if err != nil {
-		if err == syscall.EINTR {
-			return nil, &fds.ErrnoError{Errno: errno.EINTR}
-		}
-		if err == syscall.EAGAIN && g.f.nonblock {
-			// Signal EAGAIN to the guest rather than a 0-byte read:
-			// the fds.File Read contract has no other way to express
-			// "nothing ready yet", and callers like busybox wget treat
-			// a 0 return as EOF, which would end a transfer that
-			// simply hadn't drained the pipe/socket yet (see
-			// sysRead/sysReadv's errno extraction).
+		guestErrno := hostSocketErrno(err)
+		if guestErrno == errno.EAGAIN && g.f.nonblock {
 			return nil, &fds.ErrnoError{Errno: errno.EAGAIN}
 		}
-		return nil, err
+		return nil, &fds.ErrnoError{Errno: guestErrno}
 	}
-	return nil, nil // EOF
+	return nil, nil
 }
 
 func (g *GuestSocket) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
-	k, err := syscall.Write(g.f.fd, data)
+	k, err := hostSocketWrite(g.f.fd, data)
 	if k < 0 {
 		k = 0
 	}
 	if err != nil {
-		if err == syscall.EINTR {
-			return k, &fds.ErrnoError{Errno: errno.EINTR}
-		}
-		if err == syscall.EAGAIN && g.f.nonblock {
-			return k, &fds.ErrnoError{Errno: errno.EAGAIN}
-		}
-		return k, err
+		guestErrno := hostSocketErrno(err)
+		return k, &fds.ErrnoError{Errno: guestErrno}
 	}
 	return k, nil
 }
@@ -167,8 +141,5 @@ func syscallErrno(err error) int {
 			return syscallErrno(inner)
 		}
 	}
-	if errno1, ok := err.(syscall.Errno); ok {
-		return int(errno1)
-	}
-	return errno.EIO
+	return hostSocketErrno(err)
 }

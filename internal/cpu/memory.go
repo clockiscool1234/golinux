@@ -1,6 +1,9 @@
 package cpu
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+)
 
 const (
 	pageSize = 0x1000
@@ -16,8 +19,41 @@ type page struct {
 // Memory is a sparse, page-granular guest address space. Pages are
 // allocated lazily in a map rather than a flat 2^64 array; unmapped
 // addresses simply have no entry.
+//
+// cachedAddr/cachedPage/cachedOK are a one-entry direct-mapped cache
+// of the last page looked up, keyed by page-aligned address. This
+// matters a lot in practice: the instruction fetch/decode path (see
+// cursor in modrm.go) looks up a page on essentially every byte it
+// reads, and consecutive instructions overwhelmingly live in the same
+// 4KiB page as the one before them, so this turns what would
+// otherwise be a hash-map lookup (hash the address, probe a bucket)
+// per byte fetched into a single integer comparison on the hot path.
+//
+// (An earlier version of this also memoized whole decoded
+// instructions per address, on the theory that most instructions
+// executed are re-executions of a handful of loop addresses. Measured
+// on real workloads -- an `apk` invocation and a shell arithmetic
+// loop -- it made both slower, not faster: the map lookup/insert/grow
+// overhead per instruction outweighed decodeOne's own cost more often
+// than not, and it added real correctness risk (see the FS/GS and
+// ModRM base/index register fixes in operand.go/modrm.go, both found
+// while making that cache correct -- ultimately kept because deferring
+// those to execute time is free and strictly more correct regardless
+// of caching, not because the cache needed them). Removed rather than
+// carried forward as apparently-dead-but-load-bearing complexity.)
 type Memory struct {
 	pages map[uint64]*page
+
+	cachedAddr uint64
+	cachedPage *page
+	cachedOK   bool
+
+	// codeDirty is set by any write touching a ProtExec page (see
+	// copy), and consumed by the owning Engine's decode cache: once
+	// set, the next instruction fetch bumps decodeCacheGen so stale
+	// cached decodes are dropped. The flag lives here rather than on
+	// Engine because copy/writeChecked only have the Memory.
+	codeDirty bool
 }
 
 func newMemory() *Memory {
@@ -25,6 +61,39 @@ func newMemory() *Memory {
 }
 
 func pageAddr(addr uint64) uint64 { return addr &^ pageMask }
+
+// lookupPage resolves the page (if any) covering page-aligned address
+// pa, consulting -- and then updating -- the one-entry cache above.
+func (m *Memory) lookupPage(pa uint64) (*page, bool) {
+	if m.cachedOK && m.cachedAddr == pa {
+		return m.cachedPage, true
+	}
+	p, ok := m.pages[pa]
+	m.cachedAddr, m.cachedPage, m.cachedOK = pa, p, ok
+	return p, ok
+}
+
+// invalidateCache drops the cached page lookup. Called by every
+// mapping-shape-changing operation (map/unmap/protect) so the cache
+// can never serve a stale *page after e.g. MemUnmap deletes it; reads
+// and writes (the hot path) never need to call this.
+func (m *Memory) invalidateCache() { m.cachedOK = false }
+
+// invalidateCode marks guest code as possibly modified: a write hit a
+// ProtExec page. Callers are copy (the write path, including the
+// direct MemWrite host API) and the map/unmap/protect shape changes
+// below, which bump it via invalidateCache-and-dirty too. The owning
+// Engine's fetch loop polls consumeCodeDirty to decide when to drop
+// its decode cache.
+func (m *Memory) invalidateCode() { m.codeDirty = true }
+
+// consumeCodeDirty atomically clears and returns whether code (or the
+// mapping shape) changed since the last call.
+func (m *Memory) consumeCodeDirty() bool {
+	d := m.codeDirty
+	m.codeDirty = false
+	return d
+}
 
 // faultError is returned by the permission-checked access path
 // (fetchCheck) and carries what the caller needs to invoke
@@ -55,6 +124,8 @@ func (m *Memory) MemMap(addr, size uint64, perms int) error {
 	for a := addr; a < addr+size; a += pageSize {
 		m.pages[a] = &page{perm: perms}
 	}
+	m.invalidateCache()
+	m.invalidateCode()
 	return nil
 }
 
@@ -69,6 +140,8 @@ func (m *Memory) MemUnmap(addr, size uint64) error {
 	for a := base; a < end; a += pageSize {
 		delete(m.pages, a)
 	}
+	m.invalidateCache()
+	m.invalidateCode()
 	return nil
 }
 
@@ -83,6 +156,8 @@ func (m *Memory) MemProtect(addr, size uint64, perms int) error {
 			p.perm = perms
 		}
 	}
+	m.invalidateCache()
+	m.invalidateCode()
 	return nil
 }
 
@@ -140,7 +215,7 @@ func (m *Memory) copy(addr uint64, buf []byte, write bool, requirePerm int) erro
 	off := 0
 	for off < len(buf) {
 		pa := pageAddr(addr + uint64(off))
-		p, ok := m.pages[pa]
+		p, ok := m.lookupPage(pa)
 		if !ok {
 			mt := MemReadUnmapped
 			if write {
@@ -164,6 +239,22 @@ func (m *Memory) copy(addr uint64, buf []byte, write bool, requirePerm int) erro
 		pOff := (addr + uint64(off)) - pa
 		var n int
 		if write {
+			// A write into an executable page only invalidates cached
+			// decodes if it actually changes bytes: pages the emulator
+			// maps RWX (stack and brk -- see internal/emulator's
+			// MemMap calls) take constant ordinary data writes, and
+			// dropping the whole decode cache on each would cost more
+			// than the cache saves. Real self-modifying code rewrites
+			// different bytes than what's there, so a byte-compare
+			// catches it; a same-value rewrite leaves old and new
+			// decodes identical anyway.
+			// n below is how many bytes of this page the write covers;
+			// clamp the comparison to that rather than the whole
+			// remaining buffer, which can span into the next page.
+			n = min(len(buf)-off, pageSize-int(pOff))
+			if p.perm&ProtExec != 0 && !bytes.Equal(p.data[pOff:pOff+uint64(n)], buf[off:off+n]) {
+				m.codeDirty = true
+			}
 			n = copy(p.data[pOff:], buf[off:])
 		} else {
 			n = copy(buf[off:], p.data[pOff:])
@@ -187,4 +278,44 @@ func (m *Memory) readChecked(addr uint64, size int, perm int) ([]byte, error) {
 
 func (m *Memory) writeChecked(addr uint64, data []byte, perm int) error {
 	return m.copy(addr, data, true, perm)
+}
+
+// readCheckedInto is readChecked's non-allocating counterpart: it
+// fills the caller-supplied buf in place instead of returning a
+// freshly heap-allocated []byte. Callers on a hot path (the
+// instruction fetch/decode loop -- see cursor in modrm.go) pass a
+// small fixed-size array from their own stack frame, so a read that
+// -- as is overwhelmingly the common case -- doesn't straddle a page
+// boundary costs one cache-checked page lookup and a bounds-checked
+// slice copy, with no allocation and no map access at all once the
+// page is cached. Reads that do straddle a page boundary fall back to
+// the general copy() path, which handles that correctly (just not
+// especially fast) via the multi-page loop.
+func (m *Memory) readCheckedInto(addr uint64, buf []byte, perm int) error {
+	n := len(buf)
+	if n == 0 {
+		return nil
+	}
+	pa := pageAddr(addr)
+	off := addr - pa
+	if off+uint64(n) <= pageSize {
+		p, ok := m.lookupPage(pa)
+		if !ok {
+			mt := MemReadUnmapped
+			if perm == ProtExec {
+				mt = MemFetchUnmapped
+			}
+			return &faultError{MemType: mt, Addr: addr, Size: n}
+		}
+		if perm != 0 && p.perm&perm == 0 {
+			mt := MemReadUnmapped
+			if perm == ProtExec {
+				mt = MemFetchUnmapped
+			}
+			return &faultError{MemType: mt, Addr: addr, Size: n}
+		}
+		copy(buf, p.data[off:])
+		return nil
+	}
+	return m.copy(addr, buf, false, perm)
 }

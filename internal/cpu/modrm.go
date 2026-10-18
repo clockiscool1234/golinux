@@ -5,27 +5,36 @@ package cpu
 // goes through the permission-checked fetch path (ProtExec), so an
 // attempt to decode an instruction that straddles into unmapped or
 // non-executable memory faults exactly like a real fetch would.
+//
+// scratch is a reusable buffer for fetch()'s reads: since every
+// caller of fetch (u8/u16/u32/u64 below) immediately converts the
+// bytes to a number and never retains the slice itself, fetch can
+// safely hand back a slice of this fixed array instead of a fresh
+// heap allocation on every single byte/word/dword/qword read during
+// decode -- and decode reads bytes constantly (opcode, ModRM, SIB,
+// displacement, immediate), so this matters.
 type cursor struct {
-	e    *Engine
-	base uint64
-	pos  int
+	e       *Engine
+	base    uint64
+	pos     int
+	scratch [8]byte
 }
 
 func (c *cursor) fetch(n int) ([]byte, error) {
-	b, err := c.e.mem.readChecked(c.base+uint64(c.pos), n, ProtExec)
-	if err != nil {
+	buf := c.scratch[:n]
+	if err := c.e.mem.readCheckedInto(c.base+uint64(c.pos), buf, ProtExec); err != nil {
 		return nil, err
 	}
 	c.pos += n
-	return b, nil
+	return buf, nil
 }
 
 func (c *cursor) peekByte() (byte, error) {
-	b, err := c.e.mem.readChecked(c.base+uint64(c.pos), 1, ProtExec)
-	if err != nil {
+	var buf [1]byte
+	if err := c.e.mem.readCheckedInto(c.base+uint64(c.pos), buf[:], ProtExec); err != nil {
 		return 0, err
 	}
-	return b[0], nil
+	return buf[0], nil
 }
 
 func (c *cursor) u8() (uint8, error) {
@@ -116,9 +125,10 @@ func decodeModRM(e *Engine, c *cursor, rexPresent, rexR, rexX, rexB bool) (modrm
 		return modrmResult{regField: regField, rm: regOperand(int(rmRaw)|boolBit(rexB)<<3, rexPresent)}, nil
 	}
 
-	var base, index uint64
 	var haveBase, haveIndex bool
 	var baseReg, indexReg int
+	var scale uint64 = 1
+	var baseIsConstDisp bool // SIB, base==5 && mod==0: "base" is really a disp32 constant, not a register
 
 	if rmRaw == 4 {
 		// SIB byte follows.
@@ -126,26 +136,19 @@ func decodeModRM(e *Engine, c *cursor, rexPresent, rexR, rexX, rexB bool) (modrm
 		if err != nil {
 			return modrmResult{}, err
 		}
-		scale := uint64(1) << (sib >> 6)
+		scale = uint64(1) << (sib >> 6)
 		indexRaw := (sib >> 3) & 7
 		baseRaw := sib & 7
 		indexField := int(indexRaw) | boolBit(rexX)<<3
 		if indexField != 4 { // index==4 (unextended) means "no index"
 			indexReg = indexField
 			haveIndex = true
-			index = e.regs.read64(indexReg) * scale
 		}
 		if baseRaw == 5 && mod == 0 {
 			// No base register; disp32 follows instead.
-			d, err := c.i32()
-			if err != nil {
-				return modrmResult{}, err
-			}
-			base = uint64(int64(d))
-			haveBase = true // "base" here is really just the disp32 constant
+			baseIsConstDisp = true
 		} else {
 			baseReg = int(baseRaw) | boolBit(rexB)<<3
-			base = e.regs.read64(baseReg)
 			haveBase = true
 		}
 	} else if mod == 0 && rmRaw == 5 {
@@ -158,12 +161,20 @@ func decodeModRM(e *Engine, c *cursor, rexPresent, rexR, rexX, rexB bool) (modrm
 		return modrmResult{regField: regField, rm: memOperandRIP(int64(d))}, nil
 	} else {
 		baseReg = int(rmRaw) | boolBit(rexB)<<3
-		base = e.regs.read64(baseReg)
 		haveBase = true
 	}
-	_ = haveIndex
 
 	var disp int64
+	if baseIsConstDisp {
+		// This disp32 *is* the base (SIB, base==5, mod==0): read it
+		// before the mod==1/2 disp switch below, which doesn't apply
+		// to this case (mod==0 here).
+		d, err := c.i32()
+		if err != nil {
+			return modrmResult{}, err
+		}
+		disp = int64(d)
+	}
 	switch mod {
 	case 1:
 		d, err := c.i8()
@@ -179,14 +190,5 @@ func decodeModRM(e *Engine, c *cursor, rexPresent, rexR, rexX, rexB bool) (modrm
 		disp = int64(d)
 	}
 
-	addr := base + index
-	if disp < 0 {
-		addr -= uint64(-disp)
-	} else {
-		addr += uint64(disp)
-	}
-	if !haveBase && !haveIndex {
-		addr = uint64(disp)
-	}
-	return modrmResult{regField: regField, rm: memOperand(addr)}, nil
+	return modrmResult{regField: regField, rm: memOperandBaseIndex(baseReg, haveBase, indexReg, haveIndex, scale, disp)}, nil
 }

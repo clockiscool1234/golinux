@@ -8,6 +8,7 @@ package fds
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"golinux/internal/vfs"
 )
@@ -280,24 +281,152 @@ func OpenVFSFile(vv *vfs.VFS, guestPath string, flags int) (*VFSFile, error) {
 	return &VFSFile{GuestPathVal: guestPath, f: f}, nil
 }
 
+// TmpFile is an O_TMPFILE handle: an anonymous, writable regular file
+// the guest can only give a name to via linkat(fd, "", path,
+// AT_EMPTY_PATH) -- see vfs.CreateTmpFile/LinkTmpFile and the
+// O_TMPFILE branch of syscalls.openCommon. It embeds VFSFile for the
+// read/write/seek surface and just adds the bookkeeping linkat needs.
+type TmpFile struct {
+	VFSFile
+	// HostTmp is the anonymous host-side path of the file's content.
+	HostTmp string
+	// Mode is the mode to register it under when linked into place.
+	Mode int
+	// Linked records whether a linkat has already consumed this
+	// handle: the real kernel allows only one successful
+	// linkat(AT_EMPTY_PATH) per O_TMPFILE fd.
+	Linked bool
+}
+
+// OpenTmpFile wraps an anonymous host file created by
+// vfs.CreateTmpFile.
+func OpenTmpFile(f *os.File, hostTmp string, mode int) *TmpFile {
+	return &TmpFile{
+		VFSFile: VFSFile{GuestPathVal: "", f: f},
+		HostTmp: hostTmp,
+		Mode:    mode,
+	}
+}
+
+// Close releases the host file. The anonymous content is intentionally
+// left on disk (LinkTmpFile removes it on a successful link; an
+// abandoned one is indistinguishable from a crash and equally
+// harmless) -- removing it here would race a concurrent linkat.
+func (t *TmpFile) Close() error { return t.f.Close() }
+
+// fileRefs tracks how many fd-table entries (across every Table
+// sharing this *fileRefs -- see Clone) currently reference each open
+// File, mirroring the reference count the real kernel keeps on a
+// "struct file" (the open file *description*, as opposed to the file
+// *descriptor* -- dup()/dup2()/fork() hand out more descriptors
+// pointing at the same description without touching its refcount).
+//
+// Without this, dup2() and fork() (see Clone) alias the very same
+// File value across multiple fd numbers, and Table.Close used to call
+// f.Close() unconditionally the moment *any* one of those fds was
+// closed -- so a shell doing the completely ordinary
+// open()+dup2(onto stdout)+close(original) dance to implement "cmd >
+// file" would immediately close the underlying *os.File out from
+// under the fd it just dup2'd onto stdout, and the write(2) the shell
+// builtin then issues to write the redirected output would fail with
+// a real I/O error from the OS (since the fd it's holding was already
+// closed) -- exactly the "write error: I/O error" a guest shell
+// reports for e.g. `echo hi > file`. Reference-counting here so a
+// File is only actually closed once its last referencing fd goes away
+// fixes that for dup/dup2 and for fork's shared fd tables alike.
+type fileRefs struct {
+	mu     sync.Mutex
+	counts map[File]int
+}
+
+func newFileRefs() *fileRefs { return &fileRefs{counts: map[File]int{}} }
+
+func (r *fileRefs) incr(f File) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counts[f]++
+}
+
+// decrAndMaybeClose drops f's refcount by one and, if that was the
+// last reference, actually closes it -- outside the lock, since
+// File.Close() may block or do I/O.
+func (r *fileRefs) decrAndMaybeClose(f File) {
+	r.mu.Lock()
+	r.counts[f]--
+	last := r.counts[f] <= 0
+	if last {
+		delete(r.counts, f)
+	}
+	r.mu.Unlock()
+	if last {
+		_ = f.Close()
+	}
+}
+
 // Table maps small integers to open files, mirroring Python's
 // FDTable.
 type Table struct {
 	entries map[int]File
 	next    int
+	refs    *fileRefs
+
+	// cloexec marks which fds carry FD_CLOEXEC (set via open()'s
+	// O_CLOEXEC, pipe2()'s O_CLOEXEC, or fcntl(F_SETFD)/
+	// F_DUPFD_CLOEXEC) and must be closed by CloseOnExec when this
+	// process's image is replaced by execve(). Only true entries are
+	// stored; a missing key means "not set", exactly like a real
+	// per-fd flag defaulting to clear.
+	cloexec map[int]bool
 }
 
 // NewTable creates a table with stdin/stdout/stderr already open.
 func NewTable() *Table {
-	t := &Table{entries: map[int]File{}, next: 3}
+	t := &Table{entries: map[int]File{}, next: 3, refs: newFileRefs(), cloexec: map[int]bool{}}
 	t.entries[0] = newStdin()
 	t.entries[1] = newStdout()
 	t.entries[2] = newStderr()
+	t.refs.incr(t.entries[0])
+	t.refs.incr(t.entries[1])
+	t.refs.incr(t.entries[2])
 	return t
 }
 
 // Get returns the File at fd, or nil if not open.
 func (t *Table) Get(fd int) File { return t.entries[fd] }
+
+// SetCloexec sets or clears fd's FD_CLOEXEC flag.
+func (t *Table) SetCloexec(fd int, val bool) {
+	if val {
+		t.cloexec[fd] = true
+	} else {
+		delete(t.cloexec, fd)
+	}
+}
+
+// Cloexec reports whether fd currently carries FD_CLOEXEC.
+func (t *Table) Cloexec(fd int) bool { return t.cloexec[fd] }
+
+// CloseOnExec closes and removes every fd flagged FD_CLOEXEC, exactly
+// what a real execve(2) does to the calling process's fd table before
+// the new image starts running. Called by the emulator's execImage.
+//
+// Without this, a guest program's O_CLOEXEC-opened fds (or ones it
+// marked via fcntl(F_SETFD, FD_CLOEXEC)) survive into whatever it
+// exec's, even though the guest explicitly asked for them not to.
+// That's most visible with shell pipelines: a shell forks a child per
+// pipeline stage and relies on FD_CLOEXEC (or explicit close()) to
+// keep the pipe's other end from leaking into a stage that doesn't
+// need it -- if it leaks in anyway, that stage's own copy of the
+// write end keeps the pipe artificially open from its own read()'s
+// point of view, and the read blocks forever waiting for a real EOF
+// that already happened everywhere else.
+func (t *Table) CloseOnExec() {
+	for fd, on := range t.cloexec {
+		if on {
+			t.Close(fd)
+		}
+	}
+}
 
 // Entries returns every currently-open fd number, unordered -- used
 // by /proc/self/fd listing.
@@ -309,22 +438,30 @@ func (t *Table) Entries() []int {
 	return out
 }
 
-// Alloc installs f at the next available fd and returns it.
+// Alloc installs f at the next available fd and returns it. Every
+// call -- whether f is a brand-new File or one already referenced by
+// another fd (as with Dup) -- bumps f's refcount by one, matching the
+// new entry this creates.
 func (t *Table) Alloc(f File) int {
 	fd := t.next
 	t.next++
 	t.entries[fd] = f
+	t.refs.incr(f)
 	return fd
 }
 
-// Close closes and removes fd, reporting whether it was open.
+// Close closes and removes fd, reporting whether it was open. The
+// underlying File is only actually closed once its last referencing
+// fd (see fileRefs) is gone, so a dup'd/fork-shared fd being closed
+// elsewhere can't invalidate this one.
 func (t *Table) Close(fd int) bool {
 	f, ok := t.entries[fd]
 	if !ok {
 		return false
 	}
 	delete(t.entries, fd)
-	_ = f.Close()
+	delete(t.cloexec, fd)
+	t.refs.decrAndMaybeClose(f)
 	return true
 }
 
@@ -341,10 +478,45 @@ func (t *Table) Close(fd int) bool {
 // parent and child both holding it and issuing reads/writes
 // concurrently is safe the same way two threads sharing an fd in a
 // real process is.
+// CloseAll closes and removes every fd still open in this table --
+// what a real process's exit(2)/exit_group(2) does to its whole fd
+// table before it goes away. Without this, a forked child (see
+// Clone) that exits without explicitly close()ing an fd it inherited
+// (e.g. a pipeline's writer process, once done, still holds its own
+// copy of the pipe's write end as fd 1) never releases that
+// reference, so the *fileRefs refcount for that File never reaches
+// zero and the real underlying resource (here, the write end of an
+// OS pipe) never actually closes -- leaving the reader side blocked
+// in read() forever waiting for an EOF that can now never arrive,
+// even though every fd a *living* process holds has long since been
+// closed.
+func (t *Table) CloseAll() {
+	for fd := range t.entries {
+		t.Close(fd)
+	}
+}
+
+// Clone returns a new Table sharing the same *fileRefs as t (not a
+// fresh one), so the parent's and child's fd tables genuinely share
+// reference counts on every File both now point at -- necessary
+// because a File closed via the child's Table (e.g. the child closing
+// an fd it doesn't need) must not tear down the underlying resource
+// while the parent's copy of that same fd is still live, and vice
+// versa. Each copied entry's refcount is bumped once for the new
+// Table's copy of it.
 func (t *Table) Clone() *Table {
-	out := &Table{entries: make(map[int]File, len(t.entries)), next: t.next}
+	out := &Table{
+		entries: make(map[int]File, len(t.entries)),
+		next:    t.next,
+		refs:    t.refs,
+		cloexec: make(map[int]bool, len(t.cloexec)),
+	}
 	for fd, f := range t.entries {
 		out.entries[fd] = f
+		t.refs.incr(f)
+	}
+	for fd, on := range t.cloexec {
+		out.cloexec[fd] = on
 	}
 	return out
 }
@@ -370,6 +542,7 @@ func (t *Table) Dup2(oldfd, newfd int) (int, bool) {
 			t.Close(newfd)
 		}
 		t.entries[newfd] = f
+		t.refs.incr(f)
 	}
 	if newfd+1 > t.next {
 		t.next = newfd + 1

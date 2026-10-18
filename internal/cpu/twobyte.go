@@ -295,7 +295,8 @@ func (e *Engine) decodeTwoByte(
 				bit &= 7
 				rm.addr = uint64(int64(e.effAddr(rm)) + byteOff)
 				rm.ripRelative = false
-				w = 1 // Read/write only the targeted byte
+				rm.seg = segOverrideNone // addr above is already fully resolved; don't reapply
+				w = 1                    // Read/write only the targeted byte
 			}
 			base, err := e.readOperand(rm, w)
 			if err != nil {

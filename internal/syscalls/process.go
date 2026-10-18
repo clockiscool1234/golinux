@@ -56,7 +56,11 @@ func init() {
 // (pid <= 0) here always resolves to os.Getpid(), the one real host
 // process backing every guest process/goroutine in this run, rather
 // than proc.Pid() -- which, for a forked child, wouldn't correspond
-// to any real process the host kernel could look up.
+// to any real process the host kernel could look up. The actual host
+// calls (hostGetpgid/hostSetpgid/hostGetsid/hostSetsid) are behind a
+// platform-specific file (process_unix.go/process_windows.go)
+// because Windows has no POSIX process groups or sessions at all --
+// see process_windows.go's doc comment for what it reports instead.
 // --------------------------------------------------------------------------
 
 func sysGetpid(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
@@ -71,7 +75,7 @@ func sysGetppid(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
 }
 
 func sysGetpgrp(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
-	pgid, err := syscall.Getpgid(0)
+	pgid, err := hostGetpgid(0)
 	if err != nil {
 		return int64(-errnoOf(err)), nil
 	}
@@ -83,7 +87,7 @@ func sysGetpgid(proc Proc, pid, _, _, _, _, _ uint64) (int64, error) {
 	if realPid <= 0 {
 		realPid = os.Getpid()
 	}
-	pgid, err := syscall.Getpgid(realPid)
+	pgid, err := hostGetpgid(realPid)
 	if err != nil {
 		return int64(-errnoOf(err)), nil
 	}
@@ -99,7 +103,7 @@ func sysSetpgid(proc Proc, pid, pgid, _, _, _, _ uint64) (int64, error) {
 	if realPgid <= 0 {
 		realPgid = realPid
 	}
-	if err := syscall.Setpgid(realPid, realPgid); err != nil {
+	if err := hostSetpgid(realPid, realPgid); err != nil {
 		return int64(-errnoOf(err)), nil
 	}
 	return 0, nil
@@ -110,19 +114,15 @@ func sysGetsid(proc Proc, pid, _, _, _, _, _ uint64) (int64, error) {
 	if realPid <= 0 {
 		realPid = os.Getpid()
 	}
-	// syscall.Getsid isn't wrapped by the Go standard library on
-	// linux/amd64 (unlike Getpgid/Setpgid/Setsid); go straight to the
-	// raw syscall number instead of pulling in golang.org/x/sys/unix
-	// for one call.
-	sid, _, errno1 := syscall.Syscall(syscall.SYS_GETSID, uintptr(realPid), 0, 0)
-	if errno1 != 0 {
-		return int64(-int(errno1)), nil
+	sid, err := hostGetsid(realPid)
+	if err != nil {
+		return int64(-errnoOf(err)), nil
 	}
 	return int64(sid), nil
 }
 
 func sysSetsid(proc Proc, _, _, _, _, _, _ uint64) (int64, error) {
-	pid, err := syscall.Setsid()
+	pid, err := hostSetsid()
 	if err != nil {
 		return int64(-errnoOf(err)), nil
 	}

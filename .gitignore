@@ -1,0 +1,17 @@
+# rootfs files
+*.tar*
+# vfs folders
+alpine/
+alpine_*/
+
+# we dont talk about this one
+old/
+strace*
+test
+syscall_test.c
+
+vfsroot/
+golinux.exe
+alinux/
+
+perf.data*

@@ -2,6 +2,14 @@ package cpu
 
 import "fmt"
 
+// cachedDecoded is one decodeCache entry. The whole cache is dropped
+// (and rebuilt) whenever guest code is written or the mapping shape
+// changes -- see Engine.decodeCache in cpu.go -- so entries carry no
+// generation tag themselves: presence in the map IS the validity.
+type cachedDecoded struct {
+	d *decoded
+}
+
 // decoded is one fully-decoded instruction: its length in bytes (for
 // advancing RIP on fall-through) and a closure that performs its
 // semantics. exec returns branched=true if it already updated RIP
@@ -216,9 +224,9 @@ legacyPrefixes:
 				return o
 			}
 			if segFS {
-				o.addr += e.regs.fsbase
+				o.seg = segOverrideFS
 			} else if segGS {
-				o.addr += e.regs.gsbase
+				o.seg = segOverrideGS
 			}
 			return o
 		}
@@ -267,9 +275,9 @@ legacyPrefixes:
 			return o
 		}
 		if segFS {
-			o.addr += e.regs.fsbase
+			o.seg = segOverrideFS
 		} else if segGS {
-			o.addr += e.regs.gsbase
+			o.seg = segOverrideGS
 		}
 		return o
 	}

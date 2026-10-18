@@ -96,8 +96,14 @@ func sysFstat(proc Proc, fdNum, buf, _, _, _, _ uint64) (int64, error) {
 	}
 	guestPath := f.GuestPath()
 	if guestPath == "" {
-		// stdio / pipe: fabricate a minimal char-device stat.
+		// stdio / pipe / socket: fabricate a minimal stat. Sockets
+		// report S_IFSOCK (musl's isatty-adjacent helpers and
+		// connect()-preflight both fstat(2) the fd and branch on the
+		// file type); everything else here is a char device.
 		st := vfs.Stat{Mode: consts.S_IFCHR | 0o620, Nlink: 1}
+		if _, isSock := f.(*GuestSocket); isSock {
+			st.Mode = consts.S_IFSOCK | 0o777
+		}
 		if err := proc.MemWrite(buf, packStat(st)); err != nil {
 			return int64(-errno.EFAULT), nil
 		}

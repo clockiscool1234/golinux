@@ -38,8 +38,25 @@ const (
 	SYS_dup               = 32
 	SYS_dup2              = 33
 	SYS_nanosleep         = 35
+	SYS_getitimer         = 36
+	SYS_alarm             = 37
+	SYS_setitimer         = 38
 	SYS_getpid            = 39
 	SYS_socket            = 41
+	SYS_connect           = 42
+	SYS_accept            = 43
+	SYS_sendto            = 44
+	SYS_recvfrom          = 45
+	SYS_sendmsg           = 46
+	SYS_recvmsg           = 47
+	SYS_shutdown          = 48
+	SYS_bind              = 49
+	SYS_listen            = 50
+	SYS_getsockname       = 51
+	SYS_getpeername       = 52
+	SYS_socketpair        = 53
+	SYS_setsockopt        = 54
+	SYS_getsockopt        = 55
 	SYS_clone             = 56
 	SYS_fork              = 57
 	SYS_vfork             = 58
@@ -54,6 +71,7 @@ const (
 	SYS_ftruncate         = 77
 	SYS_getcwd            = 79
 	SYS_chdir             = 80
+	SYS_fchdir            = 81
 	SYS_rename            = 82
 	SYS_mkdir             = 83
 	SYS_rmdir             = 84
@@ -127,6 +145,8 @@ const (
 	SYS_getrandom         = 318
 	SYS_rseq              = 334
 	SYS_faccessat2        = 439
+	SYS_pipe2             = 293
+	SYS_accept4           = 288
 )
 
 // SyscallNames maps a syscall number to its bare name (without the
@@ -139,7 +159,8 @@ var SyscallNames = map[int]string{
 	SYS_rt_sigreturn: "rt_sigreturn", SYS_ioctl: "ioctl", SYS_pread64: "pread64",
 	SYS_pwrite64: "pwrite64", SYS_readv: "readv", SYS_writev: "writev", SYS_access: "access",
 	SYS_pipe: "pipe", SYS_select: "select", SYS_sched_yield: "sched_yield", SYS_dup: "dup",
-	SYS_dup2: "dup2", SYS_nanosleep: "nanosleep", SYS_getpid: "getpid", SYS_socket: "socket",
+	SYS_dup2: "dup2", SYS_nanosleep: "nanosleep", SYS_getitimer: "getitimer",
+	SYS_alarm: "alarm", SYS_setitimer: "setitimer", SYS_getpid: "getpid",
 	SYS_clone: "clone", SYS_fork: "fork", SYS_vfork: "vfork", SYS_execve: "execve",
 	SYS_exit: "exit", SYS_wait4: "wait4", SYS_kill: "kill", SYS_uname: "uname",
 	SYS_fcntl: "fcntl", SYS_flock: "flock", SYS_fsync: "fsync", SYS_ftruncate: "ftruncate",
@@ -167,7 +188,14 @@ var SyscallNames = map[int]string{
 	SYS_readlinkat: "readlinkat", SYS_faccessat: "faccessat", SYS_pselect6: "pselect6",
 	SYS_ppoll: "ppoll", SYS_set_robust_list: "set_robust_list", SYS_utimensat: "utimensat",
 	SYS_prlimit64: "prlimit64", SYS_getrandom: "getrandom", SYS_rseq: "rseq",
-	SYS_faccessat2: "faccessat2",
+	SYS_faccessat2: "faccessat2", SYS_fchdir: "fchdir", SYS_pipe2: "pipe2",
+	SYS_socket: "socket", SYS_connect: "connect", SYS_accept: "accept",
+	SYS_sendto: "sendto", SYS_recvfrom: "recvfrom", SYS_sendmsg: "sendmsg",
+	SYS_recvmsg: "recvmsg", SYS_shutdown: "shutdown", SYS_bind: "bind",
+	SYS_listen: "listen", SYS_getsockname: "getsockname",
+	SYS_getpeername: "getpeername", SYS_socketpair: "socketpair",
+	SYS_setsockopt: "setsockopt", SYS_getsockopt: "getsockopt",
+	SYS_accept4: "accept4",
 }
 
 // --- open(2) flags (Linux x86_64 values) --------------------------------
@@ -185,11 +213,13 @@ const (
 	O_DIRECTORY = 0o200000
 	O_NOFOLLOW  = 0o400000
 	O_CLOEXEC   = 0o2000000
+	O_TMPFILE   = 0o20000000
 )
 
 const (
 	AT_FDCWD            = -100
 	AT_SYMLINK_NOFOLLOW = 0x100
+	AT_EMPTY_PATH       = 0x1000
 )
 
 // --- mmap flags ----------------------------------------------------------
@@ -213,6 +243,50 @@ const (
 	S_IFDIR  = 0o040000
 	S_IFCHR  = 0o020000
 	S_IFIFO  = 0o010000
+)
+
+// --- socket(2) domains / types / flags (Linux x86_64 values) --------------
+const (
+	AF_UNSPEC = 0
+	AF_UNIX   = 1
+	AF_INET   = 2
+	AF_INET6  = 10
+
+	SOCK_STREAM = 1
+	SOCK_DGRAM  = 2
+	SOCK_RAW    = 3
+	SOCK_NONBLOCK_C = 0o4000  // socket() type-flag spelling of O_NONBLOCK
+	SOCK_CLOEXEC_C  = 0o2000000 // socket() type-flag spelling of O_CLOEXEC
+)
+
+// --- setsockopt(2)/getsockopt(2) --------------------------------------------
+const (
+	SOL_SOCKET = 1
+
+	SO_DEBUG        = 1
+	SO_REUSEADDR    = 2
+	SO_TYPE         = 3
+	SO_ERROR        = 4
+	SO_DONTROUTE    = 5
+	SO_BROADCAST    = 6
+	SO_SNDBUF       = 7
+	SO_RCVBUF       = 8
+	SO_KEEPALIVE    = 9
+	SO_OOBINLINE    = 10
+	SO_NO_CHECK     = 11
+	SO_PRIORITY     = 12
+	SO_LINGER       = 13
+	SO_RCVTIMEO     = 20
+	SO_SNDTIMEO     = 21
+	SO_RCVTIMEO_NEW = 66
+	SO_SNDTIMEO_NEW = 67
+)
+
+// --- shutdown(2) how -------------------------------------------------------
+const (
+	SHUT_RD   = 0
+	SHUT_WR   = 1
+	SHUT_RDWR = 2
 )
 
 // --- fcntl commands --------------------------------------------------------

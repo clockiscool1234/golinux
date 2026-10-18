@@ -41,9 +41,7 @@ package syscalls
 
 import (
 	"encoding/binary"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"golinux/internal/consts"
 	"golinux/internal/errno"
@@ -63,7 +61,8 @@ const pollfdSize = 8
 
 // rawPollFd mirrors the kernel's struct pollfd layout exactly, so a
 // slice of these can be handed straight to a real host poll(2)/
-// ppoll(2) syscall via unsafe.Pointer.
+// ppoll(2) syscall via unsafe.Pointer on platforms that have one --
+// see hostPoll in poll_unix.go/poll_windows.go.
 type rawPollFd struct {
 	fd      int32
 	events  int16
@@ -71,16 +70,20 @@ type rawPollFd struct {
 }
 
 // hostFdForFile reports the real host fd number backing f, for the
-// two fd kinds that can actually block: stdio (via the same
-// hostStdioFd lookup ioctl.go uses) and pipes. Every other kind
-// (VFSFile, StaticFile, DirHandle) returns ok=false -- they're
-// answered immediately in doPoll instead of going to the host.
+// three fd kinds that can actually block: stdio (via the same
+// hostStdioFd lookup ioctl.go uses), pipes, and sockets (real host
+// sockets, see socket.go). Every other kind (VFSFile, StaticFile,
+// DirHandle) returns ok=false -- they're answered immediately in
+// doPoll instead of going to the host.
 func hostFdForFile(f fds.File) (uintptr, bool) {
 	if hostFd, ok := hostStdioFd(f.Name()); ok {
 		return hostFd, true
 	}
 	if pe, ok := f.(*pipeEnd); ok {
 		return pe.f.Fd(), true
+	}
+	if gs, ok := f.(*GuestSocket); ok {
+		return uintptr(gs.f.fd), true
 	}
 	return 0, false
 }
@@ -196,13 +199,8 @@ func doPoll(proc Proc, fdsPtr uint64, nfds uint64, timeoutMs int64) (int64, erro
 		if immediateReady {
 			waitMs = 0 // something's already ready -- don't block further
 		}
-		_, _, errno1 := syscall.Syscall(syscall.SYS_POLL,
-			uintptr(unsafe.Pointer(&hostPollFds[0])),
-			uintptr(len(hostPollFds)),
-			uintptr(waitMs),
-		)
-		if errno1 != 0 {
-			return int64(-int(errno1)), nil
+		if e := hostPoll(hostPollFds, waitMs); e != 0 {
+			return int64(-e), nil
 		}
 		for j, idx := range hostIdx {
 			revents[idx] = hostPollFds[j].revents

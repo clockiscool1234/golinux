@@ -203,7 +203,10 @@ func (p *Process) DoBrk(addr uint64) uint64 {
 	needEnd := pageAlignUp(addr)
 	if needEnd > p.brkMappedEnd {
 		size := needEnd - p.brkMappedEnd
-		if err := p.engine.MemMap(p.brkMappedEnd, size, cpu.ProtAll); err != nil {
+		// RW like a real brk heap; PROT_EXEC here would make every
+		// heap write invalidate the cpu package's decode cache (writes
+		// to exec pages are treated as possible self-modifying code).
+		if err := p.engine.MemMap(p.brkMappedEnd, size, cpu.ProtRead|cpu.ProtWrite); err != nil {
 			p.Log(fmt.Sprintf("brk map failed: %v", err))
 			return p.brkCur
 		}
@@ -412,7 +415,11 @@ func (p *Process) Load(path string) error {
 		entry = interpImg.Entry + atBase
 	}
 
-	if err := p.engine.MemMap(pageAlignDown(stackTop-stackSize), stackSize, cpu.ProtAll); err != nil {
+	// The stack is RW like a real kernel maps it (PROT_EXEC would be
+	// wrong and, since this emulator's cpu package treats writes to
+	// executable pages as potential self-modifying code, would also
+	// make every stack store drop the decode cache).
+	if err := p.engine.MemMap(pageAlignDown(stackTop-stackSize), stackSize, cpu.ProtRead|cpu.ProtWrite); err != nil {
 		return err
 	}
 
@@ -562,6 +569,15 @@ func (p *Process) onSyscall(e *cpu.Engine) {
 	if stop, isStop := err.(*syscalls.Stop); isStop {
 		code := stop.Code
 		p.exitCode = &code
+		// A real exit(2)/exit_group(2) closes every fd the process
+		// still has open, releasing this process's share of any
+		// dup'd/fork-shared File (see fds.Table's refcounting) --
+		// most visibly, a pipeline stage that's done writing but
+		// still holds the pipe's write end as fd 1 must give that
+		// reference up here, or the reader on the other end blocks
+		// in read() forever waiting for an EOF this process's exit
+		// should have caused.
+		p.fds.CloseAll()
 		_ = e.EmuStop()
 		return
 	}
@@ -588,11 +604,14 @@ func (p *Process) onSyscall(e *cpu.Engine) {
 	}
 
 	if p.VerboseFlag {
-		if ret < 0 {
-			p.Log(fmt.Sprintf("syscall %s(%#x,%#x,%#x,%#x) = %#x", name, a0, a1, a2, a3, ret))
-		} else {
-			p.Log(fmt.Sprintf("syscall %s(%#x,%#x,%#x,%#x) = %d", name, a0, a1, a2, a3, ret))
+		// 6 arg slots (r8/r9 included) so calls whose interesting
+		// argument lands past a3 -- e.g. linkat's flags in a4 -- are
+		// diagnosable from the log. Older logs printed only a0..a3.
+		fmts := "syscall %s(%#x,%#x,%#x,%#x,%#x,%#x) = %#x"
+		if ret >= 0 {
+			fmts = "syscall %s(%#x,%#x,%#x,%#x,%#x,%#x) = %d"
 		}
+		p.Log(fmt.Sprintf(fmts, name, a0, a1, a2, a3, a4, a5, ret))
 	}
 	_ = e.RegWrite(cpu.RegRAX, uint64(ret))
 }
@@ -644,11 +663,13 @@ func (p *Process) onMemUnmapped(e *cpu.Engine, memType int, addr uint64, size in
 // cpu.Engine is opened (the old one is closed first -- engine
 // contexts can't be "reset" short of closing and reopening), memory
 // bookkeeping (mmap/brk/fsbase) is reset to a clean slate, and the
-// new ELF is loaded exactly like the initial Load(). The fd table is
-// deliberately left untouched, matching real execve(2) semantics:
-// open files survive an exec (modulo O_CLOEXEC, which this port
-// doesn't track per-fd yet).
+// new ELF is loaded exactly like the initial Load(). The fd table
+// itself otherwise survives an exec unchanged, matching real
+// execve(2) semantics -- except for fds flagged FD_CLOEXEC (via
+// O_CLOEXEC or fcntl(F_SETFD)), which CloseOnExec closes here just
+// like the real kernel would before the new image starts running.
 func (p *Process) execImage(hostPath string, argv, envp []string) error {
+	p.fds.CloseOnExec()
 	if err := p.engine.Close(); err != nil {
 		p.Log(fmt.Sprintf("exec: closing previous engine: %v", err))
 	}

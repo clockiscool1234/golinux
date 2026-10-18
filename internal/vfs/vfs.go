@@ -39,11 +39,11 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -462,11 +462,11 @@ func (v *VFS) nativeGetMeta(guestPath string) (Meta, error) {
 	}
 	var rdev uint64
 	uid, gid := 0, 0
-	if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
-		uid = int(sys.Uid)
-		gid = int(sys.Gid)
+	if ns := extractNativeStat(fi); ns.ok {
+		uid = int(ns.uid)
+		gid = int(ns.gid)
 		if typ == "chr" || typ == "blk" {
-			rdev = sys.Rdev
+			rdev = ns.rdev
 		}
 	}
 	return Meta{
@@ -706,8 +706,8 @@ func (v *VFS) Unlink(guestPath string) error {
 }
 
 var typeBits = map[string]uint32{
-	"reg": syscall.S_IFREG, "dir": syscall.S_IFDIR, "lnk": syscall.S_IFLNK,
-	"chr": syscall.S_IFCHR, "blk": syscall.S_IFBLK, "fifo": syscall.S_IFIFO,
+	"reg": modeIFREG, "dir": modeIFDIR, "lnk": modeIFLNK,
+	"chr": modeIFCHR, "blk": modeIFBLK, "fifo": modeIFIFO,
 }
 
 // Stat returns file metadata in a struct analogous to Python's stat()
@@ -719,15 +719,45 @@ func (v *VFS) Stat(guestPath string) (Stat, error) {
 		if err != nil {
 			return Stat{}, newErr(2, "no such file: "+guestPath)
 		}
-		sys, _ := st.Sys().(*syscall.Stat_t)
-		if sys == nil {
-			return Stat{}, newErr(5, "stat unsupported")
+		ns := extractNativeStat(st)
+		if !ns.ok {
+			// No POSIX struct stat available on this host platform
+			// (Windows, currently the only such target) -- synthesize
+			// the same kind of stable metadata the non-NativePerms
+			// path below already computes (stable per-path inode via
+			// md5, Dev=1, Uid/Gid=0) rather than failing every
+			// stat(2)/lstat(2) outright.
+			typ := typeFromMode(st.Mode())
+			tb, ok := typeBits[typ]
+			if !ok {
+				tb = modeIFREG
+			}
+			sum := md5.Sum([]byte(normPath(guestPath)))
+			var ino uint64
+			for i := 0; i < 6; i++ {
+				ino |= uint64(sum[i]) << (8 * i)
+			}
+			if ino == 0 {
+				ino = 1
+			}
+			nlink := uint64(1)
+			if typ == "dir" {
+				nlink = 2
+			}
+			mt := st.ModTime().Unix()
+			return Stat{
+				Dev: 1, Ino: ino,
+				Mode:  tb | uint32(st.Mode().Perm()),
+				Size:  st.Size(),
+				Mtime: mt, Atime: mt, Ctime: mt,
+				Nlink: nlink,
+			}, nil
 		}
 		return Stat{
-			Dev: uint64(sys.Dev), Ino: sys.Ino, Mode: sys.Mode,
-			Size: sys.Size, Uid: sys.Uid, Gid: sys.Gid,
-			Mtime: sys.Mtim.Sec, Atime: sys.Atim.Sec, Ctime: sys.Ctim.Sec,
-			Nlink: uint64(sys.Nlink), Rdev: sys.Rdev,
+			Dev: ns.dev, Ino: ns.ino, Mode: ns.mode,
+			Size: st.Size(), Uid: ns.uid, Gid: ns.gid,
+			Mtime: ns.mtime, Atime: ns.atime, Ctime: ns.ctime,
+			Nlink: ns.nlink, Rdev: ns.rdev,
 		}, nil
 	}
 	meta, err := v.GetMeta(guestPath)
@@ -746,7 +776,7 @@ func (v *VFS) Stat(guestPath string) (Stat, error) {
 	}
 	tb, ok := typeBits[meta.Type]
 	if !ok {
-		tb = syscall.S_IFREG
+		tb = modeIFREG
 	}
 	// Stable, unique inode derived from the guest path so that dynamic
 	// linkers (musl, glibc) which deduplicate shared libraries by
@@ -1002,6 +1032,43 @@ func (v *VFS) ImportHostFile(hostSrc, guestDst string, mode int) error {
 		return err
 	}
 	return v.register(guestDst, "reg", mode, "", 0)
+}
+
+// CreateTmpFile is the O_TMPFILE half of apk's atomic-install idiom:
+// it returns a writable host file plus its host path, placed in the
+// host directory backing guestDir but deliberately NOT registered in
+// the VFS -- invisible to the guest until LinkTmpFile (called from
+// linkat(AT_EMPTY_PATH)) gives it a name. Close plus a failed link
+// leaves nothing behind, matching O_TMPFILE's crash-atomicity story.
+func (v *VFS) CreateTmpFile(guestDir string, mode int) (*os.File, string, error) {
+	hostDir := v.HostPath(guestDir)
+	if fi, err := os.Stat(hostDir); err != nil || !fi.IsDir() {
+		return nil, "", newErr(20, "") // ENOTDIR
+	}
+	f, err := os.CreateTemp(hostDir, ".tmpfile-*")
+	if err != nil {
+		return nil, "", err
+	}
+	if mode != 0 {
+		_ = f.Chmod(fs.FileMode(mode & 0o7777))
+	}
+	return f, f.Name(), nil
+}
+
+// LinkTmpFile is the linkat(fd, "", path, AT_EMPTY_PATH) half: it
+// materializes an O_TMPFILE handle at guestDst by copying its content
+// into place and registering it -- the same content-copy "hard link"
+// semantics VFS.Link uses (see that method's comment) -- and removes
+// the anonymous original.
+func (v *VFS) LinkTmpFile(hostTmp, guestDst string, mode int) error {
+	if v.Exists(guestDst) {
+		return newErr(17, "") // EEXIST
+	}
+	if err := v.ImportHostFile(hostTmp, guestDst, mode); err != nil {
+		return err
+	}
+	os.Remove(hostTmp)
+	return nil
 }
 
 // ImportHostTree recursively imports a host directory tree into the VFS.

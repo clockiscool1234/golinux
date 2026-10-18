@@ -30,9 +30,11 @@ import (
 	"io"
 	"os"
 	"path"
+	"runtime/pprof"
 	"strings"
 
 	"golinux/internal/emulator"
+	"golinux/internal/syscalls"
 	"golinux/internal/vfs"
 
 	"github.com/klauspost/compress/gzip"
@@ -110,6 +112,7 @@ func run() int {
 		extractTar  string
 		hostFiles   stringList
 		envVars     stringList
+		cpuProfile  string
 	)
 	stringFlag(&vfsRoot, "r", "vfs-root", "./vfsroot", "host directory backing the guest '/'")
 	boolFlag(&verbose, "v", "verbose", false, "log every syscall to stderr")
@@ -118,6 +121,7 @@ func run() int {
 	stringFlag(&extractTar, "X", "extract-tarball", "", "extract a tarball into the vfs root before running, e.g. ./rootfs.tar.gz")
 	listFlag(&hostFiles, "I", "host-file", "import a host file into the VFS before running, e.g. ./hello:/bin/hello. Repeatable.")
 	listFlag(&envVars, "e", "env", "extra environment variable KEY=VAL. Repeatable.")
+	flag.StringVar(&cpuProfile, "cpuprofile", "", "write a pprof CPU profile of the run to this path (development use)")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -128,6 +132,20 @@ func run() int {
 	}
 	program := args[0]
 	progArgs := args[1:]
+
+	if cpuProfile != "" {
+		f, err := os.Create(cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "golinux: cpuprofile: %v\n", err)
+			return 1
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "golinux: cpuprofile: %v\n", err)
+			return 1
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	vv, err := vfs.New(vfsRoot, false)
 	if err != nil {
@@ -192,6 +210,20 @@ func run() int {
 		"HOME=/root", "TERM=xterm",
 	}
 	envp = append(envp, envVars...)
+
+	// Temporary host-fd lifecycle instrumentation (see
+	// socket_impl.go's debugHostFdLog): every guest socket creation /
+	// close of a host fd is printed so fd reuse across fork/dup can be
+	// audited. Guarded by an env var so normal runs are unaffected.
+	if os.Getenv("GOLINUX_DEBUG_HOSTFD") != "" {
+		syscalls.SetDebugHostFdLog(func(fd int) {
+			if fd < 0 {
+				fmt.Fprintf(os.Stderr, "[hostfd] create %d\n", -fd)
+			} else {
+				fmt.Fprintf(os.Stderr, "[hostfd] close %d\n", fd)
+			}
+		})
+	}
 
 	argv := append([]string{program}, progArgs...)
 

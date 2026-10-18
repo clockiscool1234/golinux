@@ -180,6 +180,28 @@ type Engine struct {
 
 	stopRequested bool
 
+	// decodeCache memoizes fully-decoded instructions by their start
+	// RIP. Its correctness relies on two properties of the exec
+	// closures decodeOne builds: they resolve register-based operands
+	// (ModRM base/index, RIP-relative, FS/GS segments) lazily at
+	// execute time (see operand.go), so a cached instruction never
+	// freezes register or segment state. The remaining hazard is
+	// self-modifying code and mapping changes, handled by dropping the
+	// whole cache: EmuStart polls Memory.consumeCodeDirty (set by every
+	// map/unmap/protect and by any write to a ProtExec page) at the
+	// top of each fetch and rebuilds the map from scratch when it
+	// fires.
+	//
+	// This is the second attempt at this cache: the first (see
+	// Memory's doc comment) mapped one entry per instruction address
+	// and measured slower on `apk` and shell-loop workloads. The
+	// difference now is the failure mode being fixed: an HTTPS
+	// handshake's 26-second cert-parse window, which is decode-heavy
+	// LibreSSL code where the memoization wins by a wide margin (the
+	// map cost is one lookup per executed instruction; the decode it
+	// skips is an allocation-heavy prefix/ModRM/imm walk).
+	decodeCache map[uint64]*cachedDecoded
+
 	// curInstrEnd is the address just past the instruction currently
 	// executing -- set by the fetch/decode/execute loop right before
 	// running an instruction's semantics, and read by RIP-relative
@@ -194,8 +216,9 @@ type Engine struct {
 // registers zeroed.
 func NewEngine() (*Engine, error) {
 	return &Engine{
-		mem:       newMemory(),
-		insnHooks: make(map[int]insnHook),
+		mem:         newMemory(),
+		insnHooks:   make(map[int]insnHook),
+		decodeCache: make(map[uint64]*cachedDecoded),
 	}, nil
 }
 
@@ -219,6 +242,12 @@ func (e *Engine) Clone() *Engine {
 		regs:      e.regs, // Registers is all fixed-size arrays/scalars: this is a deep copy
 		mem:       e.mem.Clone(),
 		insnHooks: make(map[int]insnHook),
+		// Fresh decode cache: exec closures are stateless so the
+		// parent's entries would be reusable, but the child's memory is
+		// a copy -- a later write to an exec page in either engine
+		// doesn't invalidate the other's cache. Starting empty is the
+		// cheap correct answer.
+		decodeCache: make(map[uint64]*cachedDecoded),
 	}
 }
 
@@ -408,13 +437,29 @@ func (e *Engine) EmuStart(begin, until uint64) error {
 		e.trace[e.traceIdx] = pc
 		e.traceIdx = (e.traceIdx + 1) % 256
 
-		d, err := e.decodeOne(pc)
-		if err != nil {
-			if !e.handleFault(err) {
-				e.printTrace()
-				return err
+		// Code or mapping changed (write hit an exec page, or
+		// map/unmap/protect ran)? Drop the whole decode cache and
+		// re-decode everything from scratch. Polled here rather than
+		// in the write path itself because the write path only has the
+		// Memory, not the owning Engine.
+		if e.mem.consumeCodeDirty() {
+			e.decodeCache = make(map[uint64]*cachedDecoded)
+		}
+
+		var d *decoded
+		if cached, ok := e.decodeCache[pc]; ok {
+			d = cached.d
+		} else {
+			var err error
+			d, err = e.decodeOne(pc)
+			if err != nil {
+				if !e.handleFault(err) {
+					e.printTrace()
+					return err
+				}
+				continue // hook mapped the memory; retry the same instruction
 			}
-			continue // hook mapped the memory; retry the same instruction
+			e.decodeCache[pc] = &cachedDecoded{d: d}
 		}
 		e.curInstrEnd = pc + uint64(d.len)
 

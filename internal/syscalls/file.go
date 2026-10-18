@@ -2,6 +2,7 @@ package syscalls
 
 import (
 	"os"
+	"syscall"
 
 	"golinux/internal/consts"
 	"golinux/internal/devices"
@@ -26,6 +27,7 @@ func init() {
 	register(consts.SYS_dup2, sysDup2)
 	register(consts.SYS_fcntl, sysFcntl)
 	register(consts.SYS_pipe, sysPipe)
+	register(consts.SYS_pipe2, sysPipe2)
 }
 
 // --------------------------------------------------------------------------
@@ -42,7 +44,7 @@ func sysRead(proc Proc, fdNum, buf, count, _, _, _ uint64) (int64, error) {
 	}
 	data, err := f.Read(int(count))
 	if err != nil {
-		return int64(-errno.EIO), nil
+		return int64(-readErrno(err)), nil
 	}
 	if err := proc.MemWrite(buf, data); err != nil {
 		return int64(-errno.EFAULT), nil
@@ -67,8 +69,19 @@ func sysWrite(proc Proc, fdNum, buf, count, _, _, _ uint64) (int64, error) {
 }
 
 // writeErrno extracts a specific errno from a *fds.ErrnoError (e.g.
-// /dev/full reporting ENOSPC on every write), falling back to EIO.
+// /dev/full reporting ENOSPC on every write, or a nonblocking socket
+// reporting EAGAIN), falling back to EIO.
 func writeErrno(err error) int {
+	if ee, ok := err.(*fds.ErrnoError); ok {
+		return ee.Errno
+	}
+	return errno.EIO
+}
+
+// readErrno is writeErrno's read-side twin. A plain nonblocking
+// EAGAIN from a socket must reach the guest as -EAGAIN, not as a
+// 0-byte read (which reads as EOF) or a generic EIO.
+func readErrno(err error) int {
 	if ee, ok := err.(*fds.ErrnoError); ok {
 		return ee.Errno
 	}
@@ -127,7 +140,13 @@ func sysReadv(proc Proc, fdNum, iov, iovcnt, _, _, _ uint64) (int64, error) {
 	for _, v := range iovs {
 		data, err := f.Read(int(v.length))
 		if err != nil {
-			return int64(-errno.EIO), nil
+			// A mid-iovec EAGAIN aborts the whole readv with -EAGAIN
+			// only when nothing has been read yet; after partial data,
+			// POSIX says return what we have.
+			if total > 0 {
+				return total, nil
+			}
+			return int64(-readErrno(err)), nil
 		}
 		if err := proc.MemWrite(v.base, data); err != nil {
 			return int64(-errno.EFAULT), nil
@@ -174,10 +193,12 @@ func sysWritev(proc Proc, fdNum, iov, iovcnt, _, _, _ uint64) (int64, error) {
 // behavior instead of the specialized handling the Python version
 // has.
 func openCommon(proc Proc, path string, flags, mode int) (int64, error) {
+	if flags&consts.O_TMPFILE != 0 {
+		return openTmpFile(proc, path, flags, mode)
+	}
 	if flags&consts.O_NOFOLLOW == 0 {
 		path = followSymlinks(proc, path)
 	}
-
 	// /proc content, for whatever's mounted `-t proc`.
 	if rel, ok := procRel(proc, path); ok {
 		return openProcfs(proc, path, rel)
@@ -235,7 +256,37 @@ func openCommon(proc Proc, path string, flags, mode int) (int64, error) {
 		}
 		return int64(-errno.EIO), nil
 	}
-	return int64(proc.Fds().Alloc(vf)), nil
+	fd := proc.Fds().Alloc(vf)
+	if flags&consts.O_CLOEXEC != 0 {
+		proc.Fds().SetCloexec(fd, true)
+	}
+	return int64(fd), nil
+}
+
+// openTmpFile implements the O_TMPFILE half of apk's atomic-install
+// idiom: an anonymous writable file created inside the directory
+// `path` names (per open(2), the pathname argument of an O_TMPFILE
+// open is the *directory*, and O_DIRECTORY is implied -- callers that
+// forget it get EINVAL like on a real kernel). The fd is a
+// *fds.TmpFile; linkat(fd, "", newpath, AT_EMPTY_PATH) in dir.go
+// gives it a name later. See vfs.CreateTmpFile/LinkTmpFile.
+func openTmpFile(proc Proc, path string, flags, mode int) (int64, error) {
+	if flags&consts.O_DIRECTORY == 0 {
+		return int64(-errno.EINVAL), nil
+	}
+	if !proc.VFS().IsDir(path) {
+		return int64(-errno.ENOTDIR), nil
+	}
+	f, hostTmp, err := proc.VFS().CreateTmpFile(path, mode)
+	if err != nil {
+		return int64(-vfsErrno(err)), nil
+	}
+	tf := fds.OpenTmpFile(f, hostTmp, mode)
+	fd := proc.Fds().Alloc(tf)
+	if flags&consts.O_CLOEXEC != 0 {
+		proc.Fds().SetCloexec(fd, true)
+	}
+	return int64(fd), nil
 }
 
 func sysOpen(proc Proc, pathPtr, flags, mode, _, _, _ uint64) (int64, error) {
@@ -338,21 +389,54 @@ func sysDup2(proc Proc, oldfd, newfd, _, _, _, _ uint64) (int64, error) {
 
 const fcntlNonblock = 0o4000
 
+// fdCloexec is FD_CLOEXEC, the sole bit F_GETFD/F_SETFD's arg carries.
+const fdCloexec = 1
+
 func sysFcntl(proc Proc, fdNum, cmd, arg, _, _, _ uint64) (int64, error) {
 	f := proc.Fds().Get(int(fdNum))
 	if f == nil {
 		return int64(-errno.EBADF), nil
 	}
 	switch int(cmd) {
-	case consts.F_DUPFD, consts.F_DUPFD_CLOEXEC:
+	case consts.F_DUPFD:
 		return int64(proc.Fds().Alloc(f)), nil
+	case consts.F_DUPFD_CLOEXEC:
+		newFd := proc.Fds().Alloc(f)
+		proc.Fds().SetCloexec(newFd, true)
+		return int64(newFd), nil
 	case consts.F_GETFD:
+		if proc.Fds().Cloexec(int(fdNum)) {
+			return fdCloexec, nil
+		}
 		return 0, nil
 	case consts.F_SETFD:
+		proc.Fds().SetCloexec(int(fdNum), arg&fdCloexec != 0)
 		return 0, nil
 	case consts.F_GETFL:
+		// Sockets report their real O_NONBLOCK state (polled by
+		// musl/glibc connect/accept retry loops to decide whether to
+		// block); everything else here never blocks, so 0.
+		if g, isSock := f.(*GuestSocket); isSock {
+			fl, e := hostSyscall(syscall.SYS_FCNTL, uintptr(g.f.fd), uintptr(consts.F_GETFL), 0)
+			if e != 0 {
+				return int64(-int(e)), nil
+			}
+			return int64(fl & 0o7777), nil
+		}
 		return 0, nil // regular files are always "blocking" -- never actually blocks here
 	case consts.F_SETFL:
+		// Forward O_NONBLOCK toggles on sockets to the host, so
+		// fcntl(F_SETFL, O_NONBLOCK) after socket() (the portable
+		// spelling of SOCK_NONBLOCK) actually takes effect. Only the
+		// O_NONBLOCK bit is honored; the guest kernel would accept
+		// more, but nothing exercised here sets others on sockets.
+		if g, isSock := f.(*GuestSocket); isSock {
+			_, e := hostSyscall(syscall.SYS_FCNTL, uintptr(g.f.fd), uintptr(consts.F_SETFL), uintptr(arg&consts.O_NONBLOCK))
+			if e != 0 {
+				return int64(-int(e)), nil
+			}
+			g.f.nonblock = arg&consts.O_NONBLOCK != 0
+		}
 		return 0, nil
 	}
 	return 0, nil
@@ -363,10 +447,14 @@ func sysFcntl(proc Proc, fdNum, cmd, arg, _, _, _ uint64) (int64, error) {
 // --------------------------------------------------------------------------
 
 func sysPipe(proc Proc, pipefdPtr, _, _, _, _, _ uint64) (int64, error) {
-	return doPipe(proc, pipefdPtr)
+	return doPipe(proc, pipefdPtr, 0)
 }
 
-func doPipe(proc Proc, pipefdPtr uint64) (int64, error) {
+func sysPipe2(proc Proc, pipefdPtr, flags, _, _, _, _ uint64) (int64, error) {
+	return doPipe(proc, pipefdPtr, int(flags))
+}
+
+func doPipe(proc Proc, pipefdPtr uint64, flags int) (int64, error) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return int64(-errno.EMFILE), nil
@@ -375,6 +463,10 @@ func doPipe(proc Proc, pipefdPtr uint64) (int64, error) {
 	wf := &pipeEnd{f: w}
 	rfd := proc.Fds().Alloc(rf)
 	wfd := proc.Fds().Alloc(wf)
+	if flags&consts.O_CLOEXEC != 0 {
+		proc.Fds().SetCloexec(rfd, true)
+		proc.Fds().SetCloexec(wfd, true)
+	}
 	buf := make([]byte, 8)
 	buf[0], buf[1], buf[2], buf[3] = byte(rfd), byte(rfd>>8), byte(rfd>>16), byte(rfd>>24)
 	buf[4], buf[5], buf[6], buf[7] = byte(wfd), byte(wfd>>8), byte(wfd>>16), byte(wfd>>24)

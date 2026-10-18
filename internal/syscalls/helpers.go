@@ -2,6 +2,7 @@ package syscalls
 
 import (
 	"encoding/binary"
+	"strconv"
 	"strings"
 
 	"golinux/internal/consts"
@@ -240,6 +241,30 @@ func vfsErrno(err error) int {
 // resolves+canonicalizes before reaching here too, but this makes it
 // an invariant of procRel itself rather than something every future
 // caller has to remember.
+// procFdLink decodes a /proc/self/fd/N (or /proc/<pid>/fd/N) magic
+// link, returning the fd it names when the path refers to the calling
+// process itself. ok is false for anything else -- including another
+// pid's fd directory, which this emulator (one Proc per process) can't
+// see -- so callers fall through to ordinary path handling.
+func procFdLink(proc Proc, path string) (int, bool) {
+	if !strings.HasPrefix(path, "/proc/") {
+		return 0, false
+	}
+	rest := strings.TrimPrefix(path, "/proc/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 || parts[1] != "fd" {
+		return 0, false
+	}
+	if parts[0] != "self" && parts[0] != "thread-self" && parts[0] != strconv.Itoa(proc.Pid()) {
+		return 0, false
+	}
+	fd, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, false
+	}
+	return fd, true
+}
+
 func procRel(proc Proc, path string) (string, bool) {
 	path = resolveAbs(proc, path)
 	if proc.VFS().MountType(path) != "proc" {

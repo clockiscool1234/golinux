@@ -33,12 +33,14 @@
 // through to ENOTTY without ever touching the host, since forwarding
 // a real fd number that happens to collide with 0/1/2 by coincidence
 // would be wrong.
+//
+// The actual host-facing syscall is behind a platform-specific file
+// (ioctl_unix.go/ioctl_windows.go): Windows has no ioctl(2)/termios
+// concept in this form at all, so see ioctl_windows.go's doc comment
+// for what happens there instead.
 package syscalls
 
 import (
-	"syscall"
-	"unsafe"
-
 	"golinux/internal/consts"
 	"golinux/internal/errno"
 )
@@ -118,9 +120,8 @@ func sysIoctl(proc Proc, fdNum, request, argPtr, _, _, _ uint64) (int64, error) 
 		copy(buf, data)
 	}
 
-	_, _, errno1 := syscall.Syscall(syscall.SYS_IOCTL, hostFd, uintptr(request), uintptr(unsafe.Pointer(&buf[0])))
-	if errno1 != 0 {
-		return int64(-int(errno1)), nil
+	if e := hostIoctl(hostFd, request, buf); e != 0 {
+		return int64(-e), nil
 	}
 
 	if isGet {

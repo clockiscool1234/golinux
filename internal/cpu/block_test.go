@@ -1,6 +1,9 @@
 package cpu
 
-import "testing"
+import (
+	"encoding/binary"
+	"testing"
+)
 
 func TestBlockJITControlFlowMatchesInterpreter(t *testing.T) {
 	code := assemble(t, `
@@ -23,8 +26,17 @@ func TestBlockJITControlFlowMatchesInterpreter(t *testing.T) {
 		if got := reg(t, e, RegRCX); got != 0 {
 			t.Fatalf("jit=%v: RCX = %d; want 0", enabled, got)
 		}
-		if enabled && len(e.blockCache) == 0 {
-			t.Fatal("block JIT did not cache any basic blocks")
+		if enabled {
+			cached := false
+			for _, block := range e.blockCache {
+				if block != nil {
+					cached = true
+					break
+				}
+			}
+			if !cached {
+				t.Fatal("block JIT did not cache any basic blocks")
+			}
 		}
 	}
 	if results[0] != 5 || results[1] != results[0] {
@@ -95,5 +107,27 @@ func TestBlockJITNearConditionalBranch(t *testing.T) {
 				t.Fatalf("RAX = %d; want %d", got, test.want)
 			}
 		})
+	}
+}
+
+func TestBlockJITLongStraightLineLoopTerminates(t *testing.T) {
+	code := []byte{0xb9, 3, 0, 0, 0}
+	for i := 0; i < 32; i++ {
+		code = append(code, 0x05, 1, 0, 0, 0)
+	}
+	code = append(code, 0xff, 0xc9, 0x0f, 0x85, 0, 0, 0, 0)
+	binary.LittleEndian.PutUint32(code[len(code)-4:], uint32(int32(5-len(code))))
+	for _, enabled := range []bool{false, true} {
+		e := newTestEngine(t, code)
+		e.SetBlockJIT(enabled)
+		if err := e.EmuStart(testCodeBase, testCodeBase+uint64(len(code))); err != nil {
+			t.Fatalf("EmuStart(jit=%v): %v", enabled, err)
+		}
+		if got := reg(t, e, RegRCX); got != 0 {
+			t.Fatalf("jit=%v: RCX = %d; want 0", enabled, got)
+		}
+		if got := reg(t, e, RegRAX); got != 96 {
+			t.Fatalf("jit=%v: RAX = %d; want 96", enabled, got)
+		}
 	}
 }

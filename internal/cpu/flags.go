@@ -128,6 +128,38 @@ func (e *Engine) logicFlags(result uint64, width int) {
 	e.setResultFlags(result, width)
 }
 
+func (e *Engine) add32Flags(a, b uint32) uint32 {
+	sum := uint64(a) + uint64(b)
+	result := uint32(sum)
+	e.setFlag(flagCF, sum>>32 != 0)
+	e.setFlag(flagOF, (^(a^b)&(a^result)&0x80000000) != 0)
+	e.setFlag(flagAF, (a^b^result)&0x10 != 0)
+	e.setFlag(flagZF, result == 0)
+	e.setFlag(flagSF, result&0x80000000 != 0)
+	e.setFlag(flagPF, parity8(byte(result)))
+	return result
+}
+
+func (e *Engine) inc32Flags(a uint32) uint32 {
+	result := a + 1
+	e.setFlag(flagOF, a == 0x7fffffff)
+	e.setFlag(flagAF, (a^1^result)&0x10 != 0)
+	e.setFlag(flagZF, result == 0)
+	e.setFlag(flagSF, result&0x80000000 != 0)
+	e.setFlag(flagPF, parity8(byte(result)))
+	return result
+}
+
+func (e *Engine) dec32Flags(a uint32) uint32 {
+	result := a - 1
+	e.setFlag(flagOF, a == 0x80000000)
+	e.setFlag(flagAF, (a^1^result)&0x10 != 0)
+	e.setFlag(flagZF, result == 0)
+	e.setFlag(flagSF, result&0x80000000 != 0)
+	e.setFlag(flagPF, parity8(byte(result)))
+	return result
+}
+
 // incFlags/decFlags set OF/AF/SF/ZF/PF for INC/DEC, which -- unlike
 // ADD/SUB -- must leave CF exactly as it was.
 func (e *Engine) incFlags(a uint64, width int) uint64 {

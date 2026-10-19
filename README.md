@@ -292,8 +292,10 @@ disk would.
 
 The experimental `--jit` mode caches groups of decoded instructions
 as basic blocks; it does not emit native machine code. The existing
-interpreter remains the default and fallback. The Alpine `apk add nano`
-test passed, but the JIT was slower in that initial benchmark.
+interpreter remains the default and fallback. Performance depends on
+workload: local CPU benchmarks show longer straight-line blocks can be
+faster, while short branch-heavy loops can be slower. Network-heavy APK
+timings vary too much to treat as a reliable CPU benchmark.
 
 Run `./golinux -h` for the full flag list.
 

@@ -463,6 +463,13 @@ legacyPrefixes:
 				}
 				immV = uint64(int64(v))
 			}
+			if idx == 0 && w == 4 {
+				return finish(func(e *Engine) (bool, error) {
+					a := e.regs.read32(0)
+					e.regs.write32(0, e.add32Flags(a, uint32(immV)))
+					return false, nil
+				})
+			}
 			dst, src := regOperand(0, rexPresent), immOperand(immV)
 			return finish(func(e *Engine) (bool, error) { return false, e.aluBinOp(idx, dst, src, w) })
 		}
@@ -504,6 +511,14 @@ legacyPrefixes:
 				return nil, err
 			}
 			immV = uint64(int64(v))
+		}
+		if idx == 0 && w == 4 && rm.kind == opndReg {
+			reg := rm.reg
+			return finish(func(e *Engine) (bool, error) {
+				a := e.regs.read32(reg)
+				e.regs.write32(reg, e.add32Flags(a, uint32(immV)))
+				return false, nil
+			})
 		}
 		src := immOperand(immV)
 		return finish(func(e *Engine) (bool, error) { return false, e.aluBinOp(idx, rm, src, w) })
@@ -824,6 +839,21 @@ legacyPrefixes:
 		}
 		rm := applySeg(mr.rm)
 		idx := mr.regField & 7
+		if w == 4 && rm.kind == opndReg {
+			reg := rm.reg
+			switch idx {
+			case 0:
+				return finish(func(e *Engine) (bool, error) {
+					e.regs.write32(reg, e.inc32Flags(e.regs.read32(reg)))
+					return false, nil
+				})
+			case 1:
+				return finish(func(e *Engine) (bool, error) {
+					e.regs.write32(reg, e.dec32Flags(e.regs.read32(reg)))
+					return false, nil
+				})
+			}
+		}
 		switch idx {
 		case 0: // INC
 			return finish(func(e *Engine) (bool, error) {

@@ -1,7 +1,7 @@
 package cpu
 
 const (
-	maxBlockInstructions = 32
+	maxBlockInstructions = 64
 	blockCacheSize       = 1024
 )
 
@@ -77,64 +77,117 @@ func (e *Engine) compileBlock(start uint64) (*basicBlock, error) {
 }
 
 func (e *Engine) executeBlock(block *basicBlock, until uint64) error {
-	if e.regs.rip != block.start {
-		return nil
-	}
-	pc := block.start
-	if until == 0 {
-		for i, d := range block.instructions {
-			if e.stopRequested {
+	for {
+		if e.regs.rip != block.start {
+			return nil
+		}
+		pc := block.start
+		instructions := block.instructions[:]
+		if until == 0 {
+			for i, d := range instructions {
+				if e.stopRequested {
+					return nil
+				}
+				if i != 0 {
+					e.trace[e.traceIdx] = pc
+					e.traceIdx = (e.traceIdx + 1) & (len(e.trace) - 1)
+				}
+				next := pc + uint64(d.len)
+				e.curInstrEnd = next
+				branched, err := d.exec(e)
+				if err != nil {
+					return err
+				}
+				if !branched {
+					e.regs.rip = next
+				}
+				if e.mem.consumeCodeDirty() {
+					e.invalidateCodeCaches()
+					return nil
+				}
+				pc = next
+				if branched {
+					block = e.cachedBlockAt(e.regs.rip)
+					if block == nil {
+						return nil
+					}
+					e.trace[e.traceIdx] = e.regs.rip
+					e.traceIdx = (e.traceIdx + 1) & (len(e.trace) - 1)
+					continue
+				}
+			}
+			block = e.cachedBlockAt(e.regs.rip)
+			if block == nil {
+				return nil
+			}
+			e.trace[e.traceIdx] = e.regs.rip
+			e.traceIdx = (e.traceIdx + 1) & (len(e.trace) - 1)
+			continue
+		}
+		chained := false
+		for i, d := range instructions {
+			if e.stopRequested || e.regs.rip == until {
 				return nil
 			}
 			if i != 0 {
 				e.trace[e.traceIdx] = pc
-				e.traceIdx = (e.traceIdx + 1) % len(e.trace)
+				e.traceIdx = (e.traceIdx + 1) & (len(e.trace) - 1)
 			}
-			e.curInstrEnd = pc + uint64(d.len)
+			next := pc + uint64(d.len)
+			e.curInstrEnd = next
 			branched, err := d.exec(e)
 			if err != nil {
 				return err
 			}
 			if !branched {
-				e.regs.rip = e.curInstrEnd
+				e.regs.rip = next
 			}
 			if e.mem.consumeCodeDirty() {
 				e.invalidateCodeCaches()
 				return nil
 			}
+			pc = next
 			if branched {
-				return nil
+				if e.regs.rip == until {
+					return nil
+				}
+				block = e.cachedBlockAt(e.regs.rip)
+				if block == nil {
+					return nil
+				}
+				e.trace[e.traceIdx] = e.regs.rip
+				e.traceIdx = (e.traceIdx + 1) & (len(e.trace) - 1)
+				chained = true
+				break
 			}
-			pc = e.regs.rip
 		}
+		if chained {
+			continue
+		}
+		if e.regs.rip == until {
+			return nil
+		}
+		block = e.cachedBlockAt(e.regs.rip)
+		if block == nil {
+			return nil
+		}
+		e.trace[e.traceIdx] = e.regs.rip
+		e.traceIdx = (e.traceIdx + 1) & (len(e.trace) - 1)
+	}
+}
+
+func (e *Engine) cachedBlockAt(start uint64) *basicBlock {
+	if e.cachedBlock != nil && e.cachedBlockStart == start && e.cachedBlock.generation == e.blockCacheGeneration {
+		return e.cachedBlock
+	}
+	slot := int((start >> 1) & (blockCacheSize - 1))
+	block := e.blockCache[slot]
+	if block == nil || block.start != start || block.generation != e.blockCacheGeneration {
 		return nil
 	}
-	for i, d := range block.instructions {
-		if e.stopRequested || e.regs.rip == until {
-			return nil
-		}
-		if i != 0 {
-			e.trace[e.traceIdx] = pc
-			e.traceIdx = (e.traceIdx + 1) % len(e.trace)
-		}
-		e.curInstrEnd = pc + uint64(d.len)
-		branched, err := d.exec(e)
-		if err != nil {
-			return err
-		}
-		if !branched {
-			e.regs.rip = e.curInstrEnd
-		}
-		if e.mem.consumeCodeDirty() {
-			e.invalidateCodeCaches()
-			return nil
-		}
-		if branched {
-			return nil
-		}
-		pc = e.regs.rip
-	}
-	return nil
+	e.cachedBlockStart = start
+	e.cachedBlock = block
+	return block
 }
 
 func (e *Engine) invalidateCodeCaches() {
